@@ -126,8 +126,11 @@ export function loadWalletKeys(): WalletKey[] {
 
   const add = (id: string, label: string, raw: string | undefined) => {
     if (!raw) return;
-    // Accept keys with or without the 0x prefix (and surrounding whitespace).
     let key = raw.trim();
+    // "EMPTY" (case-insensitive) and blank are cleared-slot sentinels — skip,
+    // since Railway's CLI can't store a truly empty value or delete a var.
+    if (key === "" || key.toUpperCase() === "EMPTY") return;
+    // Accept keys with or without the 0x prefix.
     if (!/^0x/i.test(key)) key = `0x${key}`;
     if (!/^0x[0-9a-fA-F]{64}$/.test(key))
       throw new Error(`${id}: private key must be 64 hex chars (0x prefix optional)`);

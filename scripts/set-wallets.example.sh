@@ -22,8 +22,9 @@ set -euo pipefail
 # ============================ CONFIG ============================
 SERVICE="automation"               # Railway service name
 STATE_PATH="/data/bot-state.json"  # must match BOT_STATE_PATH on Railway
-MAX_SLOTS=20                        # number of WALLET_n_* slots to clear each run
 RESET_STATE=true                   # wipe persisted armed flags/positions on reset
+SENTINEL="EMPTY"                   # value used to clear a slot (bot treats as no-wallet;
+                                   # Railway's CLI can't store a truly empty value)
 
 # ===================== DEFINE YOUR WALLETS ======================
 # One per line as  "Label|<64 hex private key>".  The 0x prefix is OPTIONAL.
@@ -51,21 +52,24 @@ done
 
 COUNT=${#KEYS[@]}
 if (( COUNT == 0 )); then echo "ERROR: no wallets defined." >&2; exit 1; fi
-if (( COUNT > MAX_SLOTS )); then
-  echo "ERROR: ${COUNT} wallets exceeds MAX_SLOTS=${MAX_SLOTS}. Raise MAX_SLOTS." >&2
-  exit 1
-fi
-echo "Setting ${COUNT} wallet(s) on '${SERVICE}'; clearing the remaining slots up to ${MAX_SLOTS}."
 
-# Build a single variables command that defines EVERY slot exactly once:
-# slots 1..COUNT get the real wallets; the rest are set empty (= cleared).
+# Discover which wallet slots are ALREADY set on Railway (so we clear leftovers
+# from a previous run). We extract only slot numbers — never values.
+EXISTING=$(railway variables --service "$SERVICE" --kv 2>/dev/null \
+  | sed -nE 's/^WALLET_([0-9]+)_(KEY|LABEL)=.*/\1/p' | sort -un)
+
+echo "Setting ${COUNT} wallet(s) on '${SERVICE}'; clearing any leftover slots."
+
+# slots 1..COUNT get the real wallets; existing slots beyond COUNT get the
+# sentinel (CLI-accepted non-empty value the bot ignores).
 SET_ARGS=()
-for (( i=1; i<=MAX_SLOTS; i++ )); do
-  idx=$(( i - 1 ))
-  if (( idx < COUNT )); then
-    SET_ARGS+=( --set "WALLET_${i}_KEY=${KEYS[$idx]}" --set "WALLET_${i}_LABEL=${LABELS[$idx]}" )
-  else
-    SET_ARGS+=( --set "WALLET_${i}_KEY=" --set "WALLET_${i}_LABEL=" )
+for (( j=1; j<=COUNT; j++ )); do
+  idx=$(( j - 1 ))
+  SET_ARGS+=( --set "WALLET_${j}_KEY=${KEYS[$idx]}" --set "WALLET_${j}_LABEL=${LABELS[$idx]}" )
+done
+for e in $EXISTING; do
+  if (( e > COUNT )); then
+    SET_ARGS+=( --set "WALLET_${e}_KEY=${SENTINEL}" --set "WALLET_${e}_LABEL=${SENTINEL}" )
   fi
 done
 
