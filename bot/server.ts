@@ -1,0 +1,163 @@
+#!/usr/bin/env bun
+// Dashboard server + background trading loop.
+//   bun bot/server.ts
+// Serves the dashboard (market metrics, per-wallet portfolios, arm/disarm),
+// and runs the strategy on a loop. Trades only armed wallets; dry-run safe.
+import { createHmac, timingSafeEqual } from "node:crypto";
+import { loadRuntime, loadStrategy } from "./config.ts";
+import { initRead } from "./chain.ts";
+import { initNotify, error as notifyError, info as notifyInfo } from "./notify.ts";
+import { buildWallets } from "./wallets.ts";
+import { buildPortfolio } from "./portfolio.ts";
+import { oneCycle, type CycleResult } from "./orchestrator.ts";
+import { loadState, saveState, walletSlot } from "./state.ts";
+import { dashboardHtml } from "./ui.ts";
+import type { BotState } from "./types.ts";
+
+const rc = loadRuntime();
+const cfg = loadStrategy(rc.configPath);
+initRead({ rpc: rc.rpc, integratorAddress: rc.integratorAddress, integratorFeeBps: rc.integratorFeeBps });
+initNotify({ slackWebhook: rc.slackWebhook, dryRun: rc.dryRun });
+
+const wallets = buildWallets(rc.wallets);
+const state: BotState = loadState(rc.statePath);
+// Ensure a slot exists for each loaded wallet.
+for (const w of wallets) walletSlot(state, w.id);
+saveState(rc.statePath, state);
+
+let latest: CycleResult | null = null;
+let running = false;
+
+if (!rc.dashboardPassword)
+  console.warn("⚠️  DASHBOARD_PASSWORD not set — dashboard is UNAUTHENTICATED. Set it before exposing publicly.");
+
+// ---- session auth (HMAC cookie) ----
+const COOKIE = "bot_session";
+function sign(exp: number): string {
+  const mac = createHmac("sha256", rc.sessionSecret).update(String(exp)).digest("hex");
+  return `${exp}.${mac}`;
+}
+function makeSessionCookie(): string {
+  const exp = Date.now() + rc.sessionSeconds * 1000;
+  const val = sign(exp);
+  return `${COOKIE}=${val}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${rc.sessionSeconds}`;
+}
+function validCookie(req: Request): boolean {
+  if (!rc.dashboardPassword) return true; // no password configured => open (dev)
+  const raw = req.headers.get("cookie") ?? "";
+  const m = raw.match(new RegExp(`${COOKIE}=([^;]+)`));
+  if (!m) return false;
+  const [expStr, mac] = m[1].split(".");
+  const exp = parseInt(expStr, 10);
+  if (!exp || Date.now() > exp) return false;
+  const expected = sign(exp).split(".")[1];
+  try {
+    return timingSafeEqual(Buffer.from(mac ?? ""), Buffer.from(expected));
+  } catch {
+    return false;
+  }
+}
+const json = (data: unknown, status = 200, headers: Record<string, string> = {}) =>
+  new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json", ...headers } });
+
+// ---- background loop ----
+async function tick(): Promise<void> {
+  if (running) return;
+  running = true;
+  try {
+    latest = await oneCycle(rc, cfg, wallets, state);
+    const s = latest.summary;
+    console.log(
+      `[cycle] ${new Date().toISOString()} status=${s.status} armed=${s.armedWallets} ` +
+        `entries=${s.entries.length} exits=${s.exits.length} errors=${s.errors.length} ` +
+        `open=${s.openPositions} exposure=${s.exposureUsdt.toFixed(2)}`,
+    );
+  } catch (e) {
+    await notifyError(`cycle failed: ${(e as Error).message}`);
+  } finally {
+    running = false;
+  }
+}
+
+// ---- HTTP ----
+const server = Bun.serve({
+  hostname: rc.host,
+  port: rc.port,
+  async fetch(req) {
+    const url = new URL(req.url);
+    const { pathname } = url;
+
+    if (pathname === "/" || pathname === "/index.html")
+      return new Response(dashboardHtml({ dryRun: rc.dryRun, market: rc.targetMarket }), {
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+
+    if (pathname === "/healthz") return json({ ok: true, lastRun: state.lastRun });
+
+    if (pathname === "/api/login" && req.method === "POST") {
+      const body = (await req.json().catch(() => ({}))) as { password?: string };
+      if (!rc.dashboardPassword || body.password === rc.dashboardPassword)
+        return json({ ok: true }, 200, { "set-cookie": makeSessionCookie() });
+      return json({ error: "invalid password" }, 401);
+    }
+    if (pathname === "/api/logout" && req.method === "POST")
+      return json({ ok: true }, 200, { "set-cookie": `${COOKIE}=; Path=/; Max-Age=0` });
+
+    // everything below requires auth
+    if (!validCookie(req)) return json({ error: "unauthorized" }, 401);
+
+    if (pathname === "/api/market") {
+      if (!latest) return json({ error: "warming up" }, 503);
+      return json(latest.snapshot);
+    }
+
+    if (pathname === "/api/wallets") {
+      const snap = latest?.snapshot;
+      if (!snap) return json({ error: "warming up" }, 503);
+      const portfolios = await Promise.all(
+        wallets.map((w) =>
+          buildPortfolio(rc.targetMarket, w, state, snap).catch((e) => ({
+            id: w.id,
+            label: w.label,
+            address: w.address,
+            armed: walletSlot(state, w.id).armed,
+            canSign: true,
+            bnb: 0,
+            usdt: 0,
+            positions: [],
+            positionValueUsdt: 0,
+            realizedPnlUsdt: walletSlot(state, w.id).realizedPnlUsdt,
+            claimableUsdt: 0,
+            error: (e as Error).message,
+          })),
+        ),
+      );
+      return json({ wallets: portfolios });
+    }
+
+    const armMatch = pathname.match(/^\/api\/wallets\/([^/]+)\/arm$/);
+    if (armMatch && req.method === "POST") {
+      const id = armMatch[1];
+      if (!wallets.some((w) => w.id === id)) return json({ error: "unknown wallet" }, 404);
+      const body = (await req.json().catch(() => ({}))) as { armed?: boolean };
+      const ws = walletSlot(state, id);
+      ws.armed = !!body.armed;
+      saveState(rc.statePath, state);
+      const label = wallets.find((w) => w.id === id)?.label ?? id;
+      await notifyInfo(`${label} ${ws.armed ? "ARMED 🟢 (will trade)" : "disarmed ⚪ (safe)"}`);
+      return json({ ok: true, armed: ws.armed });
+    }
+
+    return json({ error: "not found" }, 404);
+  },
+});
+
+console.log(
+  `\n42 bot dashboard → http://${rc.host}:${server.port}\n` +
+    `  market=${rc.targetMarket}\n  wallets=${wallets.length}  dryRun=${rc.dryRun}  interval=${rc.intervalSec}s\n`,
+);
+await notifyInfo(`Bot online. Market ${rc.targetMarket.slice(0, 10)}…, ${wallets.length} wallet(s) loaded (all SAFE until armed).`);
+
+// kick off the loop
+await tick();
+setInterval(tick, rc.intervalSec * 1000);
