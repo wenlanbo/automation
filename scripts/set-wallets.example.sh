@@ -26,21 +26,23 @@ MAX_SLOTS=20                        # number of WALLET_n_* slots to clear each r
 RESET_STATE=true                   # wipe persisted armed flags/positions on reset
 
 # ===================== DEFINE YOUR WALLETS ======================
-# One per line as  "Label|0x<64 hex private key>".  Add/remove freely.
+# One per line as  "Label|<64 hex private key>".  The 0x prefix is OPTIONAL.
 WALLETS=(
-  "Main|0xREPLACE_WITH_REAL_64_HEX_PRIVATE_KEY_0000000000000000000000"
-  "Alt|0xREPLACE_WITH_REAL_64_HEX_PRIVATE_KEY_0000000000000000000000"
+  "Main|REPLACE_WITH_REAL_64_HEX_PRIVATE_KEY_000000000000000000000000"
+  "Alt|REPLACE_WITH_REAL_64_HEX_PRIVATE_KEY_000000000000000000000000"
   # "Whale|0x...."
 )
 # ================================================================
 
-key_re='^0x[0-9a-fA-F]{64}$'
 declare -a KEYS=() LABELS=()
 for entry in "${WALLETS[@]}"; do
   label="${entry%%|*}"
   key="${entry#*|}"
-  if [[ ! "$key" =~ $key_re ]]; then
-    echo "ERROR: wallet '$label' — key must be 0x + 64 hex chars." >&2
+  # Normalize: trim and ensure a 0x prefix before validating.
+  key="${key#"${key%%[![:space:]]*}"}"; key="${key%"${key##*[![:space:]]}"}"
+  [[ "$key" =~ ^0[xX] ]] || key="0x${key}"
+  if [[ ! "$key" =~ ^0x[0-9a-fA-F]{64}$ ]]; then
+    echo "ERROR: wallet '$label' — key must be 64 hex chars (0x prefix optional)." >&2
     exit 1
   fi
   LABELS+=("$label")

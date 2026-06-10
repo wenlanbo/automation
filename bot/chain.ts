@@ -48,11 +48,13 @@ export function initRead(opts: {
   integratorFeeBps = opts.integratorFeeBps ?? 0n;
 }
 
-/** Build a signer from a private key (kept only in memory). */
+/** Build a signer from a private key (kept only in memory). 0x prefix optional. */
 export function makeSigner(privateKey: string): Signer {
-  if (!/^0x[0-9a-fA-F]{64}$/.test(privateKey))
-    throw new Error("private key must be 0x + 64 hex chars");
-  const account = privateKeyToAccount(privateKey as Hex);
+  let key = privateKey.trim();
+  if (!/^0x/i.test(key)) key = `0x${key}`;
+  if (!/^0x[0-9a-fA-F]{64}$/.test(key))
+    throw new Error("private key must be 64 hex chars (0x prefix optional)");
+  const account = privateKeyToAccount(key as Hex);
   const walletClient = createWalletClient({ account, chain: bsc, transport: http(rpcUrl) });
   return { account, walletClient, address: account.address };
 }

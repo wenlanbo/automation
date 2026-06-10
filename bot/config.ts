@@ -124,10 +124,13 @@ export function loadWalletKeys(): WalletKey[] {
   const out: WalletKey[] = [];
   const seen = new Set<string>();
 
-  const add = (id: string, label: string, key: string | undefined) => {
-    if (!key) return;
+  const add = (id: string, label: string, raw: string | undefined) => {
+    if (!raw) return;
+    // Accept keys with or without the 0x prefix (and surrounding whitespace).
+    let key = raw.trim();
+    if (!/^0x/i.test(key)) key = `0x${key}`;
     if (!/^0x[0-9a-fA-F]{64}$/.test(key))
-      throw new Error(`${id}: private key must be 0x + 64 hex chars`);
+      throw new Error(`${id}: private key must be 64 hex chars (0x prefix optional)`);
     if (seen.has(key.toLowerCase())) return; // de-dupe
     seen.add(key.toLowerCase());
     out.push({ id, label, privateKey: key });
