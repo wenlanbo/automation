@@ -12,3 +12,10 @@ bot-state.json.tmp
 
 # Local Claude Code / editor settings (machine-specific)
 .claude/
+
+# Operator script holding real private keys — never commit
+scripts/set-wallets.sh
+set-wallets.sh
+
+# macOS
+.DS_Store
