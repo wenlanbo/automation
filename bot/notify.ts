@@ -22,6 +22,14 @@ async function send(text: string): Promise<void> {
 
 const tag = () => (dryRun ? "DRY-RUN" : "LIVE");
 
+/** Send a pre-formatted message verbatim (used for trade logs). */
+export function message(text: string): Promise<void> {
+  return send(text);
+}
+export function tagStr(): string {
+  return tag();
+}
+
 export function info(text: string): Promise<void> {
   return send(`ℹ️ [${tag()}] ${text}`);
 }
@@ -44,17 +52,17 @@ export interface Heartbeat {
   realizedPnlUsdt: number;
   armedWallets: number;
   topOutcome?: { name: string; price: number };
+  extraLines?: string[];
 }
 
 export function heartbeat(h: Heartbeat): Promise<void> {
   const lines = [
-    `💓 [${tag()}] 42 bot heartbeat`,
+    `💓 [${tag()}] 42 market summary`,
     `• Market: ${h.question} (${h.status})`,
     `• Market cap: ${h.totalMarketCap.toFixed(0)} USDT | volume: ${h.volume.toFixed(0)} USDT`,
-    h.topOutcome
-      ? `• Leading: ${h.topOutcome.name} @ ${h.topOutcome.price.toFixed(4)}`
-      : "",
-    `• Armed wallets: ${h.armedWallets} | open positions: ${h.openPositions} | exposure: ${h.exposureUsdt.toFixed(2)} USDT`,
+    ...(h.extraLines && h.extraLines.length ? ["• Top outcomes:"] : []),
+    ...(h.extraLines ?? []),
+    `• Campaign wallets armed: ${h.armedWallets} | open positions: ${h.openPositions} | exposure: ${h.exposureUsdt.toFixed(2)} USDT`,
     `• Realized PnL: ${h.realizedPnlUsdt >= 0 ? "+" : ""}${h.realizedPnlUsdt.toFixed(3)} USDT`,
   ].filter(Boolean);
   return send(lines.join("\n"));

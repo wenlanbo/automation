@@ -112,9 +112,28 @@ export interface WalletState {
   realizedPnlUsdt: number;
 }
 
+/** Progress of one campaign leg (buy-all then ladder-sell), keyed by walletId. */
+export interface CampaignProgress {
+  outcome: string;
+  tokenId: number;
+  phase: "pending_buy" | "selling" | "done";
+  /** OT bought (wei string) at entry — the ladder base. */
+  initialOtWei: string;
+  /** Per-tick sell size (wei string), ~initial/sellChunks, tick-aligned. */
+  chunkWei: string;
+  sellsRemaining: number;
+  buyUsdt: number;
+  /** ISO of the last buy/sell action (gates the 5-min cadence). */
+  lastActionAt: string | null;
+  buyTx?: string;
+  lastSellTx?: string;
+}
+
 export interface BotState {
   /** Keyed by wallet id (label-derived or address). */
   wallets: Record<string, WalletState>;
+  /** Distribute-out campaign progress, keyed by walletId. */
+  campaign?: Record<string, CampaignProgress>;
   lastRun: string | null;
   lastHeartbeat: string | null;
 }

@@ -7,6 +7,7 @@ import type { BotState, MarketSnapshot, Outcome, Position, StrategyConfig } from
 import { passesEntry } from "./rules.ts";
 import * as chain from "./chain.ts";
 import * as notify from "./notify.ts";
+import { campaignSummary } from "./campaign.ts";
 import { inCooldown, totalExposure, walletSlot } from "./state.ts";
 import type { ManagedWallet } from "./wallets.ts";
 
@@ -209,7 +210,12 @@ export async function maybeHeartbeat(
   const now = Date.now();
   const last = state.lastHeartbeat ? new Date(state.lastHeartbeat).getTime() : 0;
   if (now - last < rc.heartbeatSec * 1000) return;
-  const top = [...snapshot.outcomes].sort((a, b) => b.price - a.price)[0];
+  const byCap = [...snapshot.outcomes].sort((a, b) => b.marketCap - a.marketCap);
+  const top = byCap[0];
+  // Top 3 outcomes by market cap, for a richer market summary.
+  const topLines = byCap
+    .slice(0, 3)
+    .map((o) => `   - ${o.name}: ${o.price.toFixed(4)} (cap ${o.marketCap.toFixed(0)})`);
   await notify.heartbeat({
     question: snapshot.question,
     status: snapshot.status,
@@ -220,6 +226,7 @@ export async function maybeHeartbeat(
     realizedPnlUsdt: summary.realizedPnlUsdt,
     armedWallets: summary.armedWallets,
     topOutcome: top ? { name: top.name, price: top.price } : undefined,
+    extraLines: [...topLines, ...campaignSummary(state)],
   });
   state.lastHeartbeat = new Date(now).toISOString();
 }
