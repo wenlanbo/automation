@@ -364,9 +364,10 @@ export function freshProgress(
   dryRun: boolean,
 ): VolumeProgress {
   const rand = (r: [number, number]) => r[0] + Math.random() * (r[1] - r[0]);
-  // Each (repeat) window picks a fresh random integer multiple in [10, 15];
-  // the trade cadence is scaled to that target so realized volume tracks it.
-  const targetMultiple = randint(10, 15);
+  // Repeating (24/7) windows roll a fresh random integer multiple in [10,15];
+  // a single window (repeatWindow=false, e.g. a one-shot sprint) uses the
+  // configured multiple directly. Cadence is scaled to whichever target.
+  const targetMultiple = cfg.repeatWindow ? randint(10, 15) : cfg.targetVolumeMultiple;
   const iv = effectiveIntervals(cfg, targetMultiple);
   return {
     phase: "trading",

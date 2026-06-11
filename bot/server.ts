@@ -22,6 +22,15 @@ initNotify({ slackWebhook: rc.slackWebhook, dryRun: rc.dryRun });
 
 const wallets = buildWallets(rc.wallets);
 const state: BotState = loadState(rc.statePath);
+// One-shot reset: clear volume progress + flags so fresh windows start now.
+// Set VOLUME_RESET=1, deploy once, then unset it (otherwise every reboot resets).
+if (process.env.VOLUME_RESET) {
+  delete state.volume;
+  delete state.volumeDoneAlerted;
+  delete state.paused;
+  delete state.gasWatch;
+  console.warn("⚠️  VOLUME_RESET set — cleared volume progress, paused flag, and gas watch.");
+}
 // Ensure a slot exists for each loaded wallet.
 for (const w of wallets) walletSlot(state, w.id);
 saveState(rc.statePath, state);
