@@ -17,6 +17,7 @@ import {
   decideSell,
   forceLiquidation,
   freshProgress,
+  windowIntervals,
   type Intent,
   type Portfolio,
 } from "./volume-strategy.ts";
@@ -306,13 +307,13 @@ export async function runVolumeStrategy(
       if (rc.dryRun && carryPaper) prog.paper = carryPaper; // preserve paper holdings + cash
       state.volume[id] = prog;
       await notify.info(
-        `volume ${w.label}: window ${windowNum} started — capital ${f(portfolioVal, 2)} USDT, target ${cfg.targetVolumeMultiple}x over ${cfg.durationHours}h`,
+        `volume ${w.label}: window ${windowNum} started — capital ${f(portfolioVal, 2)} USDT, target ${prog.targetMultiple ?? cfg.targetVolumeMultiple}x over ${cfg.durationHours}h`,
       );
     }
     if (prog.phase === "done") continue;
 
     const elapsed = (now - new Date(prog.startedAt).getTime()) / 1000;
-    const r = computeRates(cfg, prog.initialBalance);
+    const r = computeRates(cfg, prog.initialBalance, prog.targetMultiple);
 
     // Live balances (cash + gas) for this tick.
     const ctx: Ctx = {
@@ -345,11 +346,13 @@ export async function runVolumeStrategy(
       }
 
       const rand = (a: [number, number]) => a[0] + Math.random() * (a[1] - a[0]);
+      // Trade cadence scaled to this window's target multiple (higher → faster).
+      const iv = windowIntervals(prog.targetMultiple ?? cfg.targetVolumeMultiple);
 
       // BUY event.
       if (now >= new Date(prog.nextBuyAt).getTime()) {
         if (elapsed < r.tStopBuy) {
-          const dt = rand(cfg.buyIntervalSec);
+          const dt = rand(iv);
           await execIntents(ctx, decideBuy(prog, cfg, ctx.pf, elapsed, dt));
           prog.nextBuyAt = new Date(now + dt * 1000).toISOString();
         } else {
@@ -359,7 +362,7 @@ export async function runVolumeStrategy(
 
       // SELL event.
       if (now >= new Date(prog.nextSellAt).getTime()) {
-        const dt = prog.cascadeSellsRemaining > 0 ? rand([300, 900]) : rand(cfg.sellIntervalSec);
+        const dt = prog.cascadeSellsRemaining > 0 ? rand([60, 300]) : rand(iv);
         await execIntents(ctx, decideSell(prog, cfg, ctx.pf, elapsed, dt));
         prog.nextSellAt = new Date(now + dt * 1000).toISOString();
       }

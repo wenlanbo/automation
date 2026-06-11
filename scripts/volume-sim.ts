@@ -14,6 +14,7 @@ import {
   forceLiquidation,
   freshProgress,
   portfolioValue,
+  windowIntervals,
   type Intent,
   type Portfolio,
 } from "../bot/volume-strategy.ts";
@@ -63,11 +64,14 @@ function runOne(cfg: VolumeConfig, balance: number): { volume: number; cashRatio
   const { pf } = makePortfolio(cfg);
   pf.cash = balance;
   const prog = freshProgress(cfg, balance, 0, false);
-  const r = computeRates(cfg, balance);
-  const rand = (a: [number, number]) => a[0] + Math.random() * (a[1] - a[0]);
+  prog.targetMultiple = cfg.targetVolumeMultiple; // test the requested multiple, not the random one
+  const r = computeRates(cfg, balance, prog.targetMultiple);
+  const iv = windowIntervals(prog.targetMultiple); // target-scaled cadence
+  const tick = parseInt(process.env.TICK_SEC ?? "60", 10); // mimic BOT_INTERVAL clamp
+  const rand = (a: [number, number]) => Math.max(tick, a[0] + Math.random() * (a[1] - a[0]));
 
-  let nextBuy = rand(cfg.buyIntervalSec);
-  let nextSell = rand(cfg.sellIntervalSec);
+  let nextBuy = rand(iv);
+  let nextSell = rand(iv);
   let t = 0;
   while (t < r.durationSec) {
     const isBuy = nextBuy < nextSell;
@@ -75,11 +79,11 @@ function runOne(cfg: VolumeConfig, balance: number): { volume: number; cashRatio
     if (eventTime >= r.durationSec) break;
     t = eventTime;
     if (isBuy) {
-      const dt = rand(cfg.buyIntervalSec);
+      const dt = rand(iv);
       for (const it of decideBuy(prog, cfg, pf, t, dt)) applyFill(pf, prog, it);
       nextBuy = t < r.tStopBuy ? t + dt : Infinity;
     } else {
-      const dt = prog.cascadeSellsRemaining > 0 ? rand([300, 900]) : rand(cfg.sellIntervalSec);
+      const dt = prog.cascadeSellsRemaining > 0 ? rand([60, 300]) : rand(iv);
       for (const it of decideSell(prog, cfg, pf, t, dt)) applyFill(pf, prog, it);
       nextSell = t + dt;
     }

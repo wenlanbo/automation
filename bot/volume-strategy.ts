@@ -67,12 +67,12 @@ export interface Rates {
   largeBuyThreshold: number;
 }
 
-export function computeRates(cfg: VolumeConfig, initialBalance: number): Rates {
+export function computeRates(cfg: VolumeConfig, initialBalance: number, multiple?: number): Rates {
   const durationSec = cfg.durationHours * 3600;
   const correction = cfg.continuousTrading
     ? 1.0 + 0.15 * Math.max(0, 0.9 - cfg.targetCashRatio)
     : 1.0;
-  const targetVolume = initialBalance * cfg.targetVolumeMultiple * correction;
+  const targetVolume = initialBalance * (multiple ?? cfg.targetVolumeMultiple) * correction;
   const targetBuy = targetVolume / 2;
   const targetSell = targetVolume / 2;
   const tStopBuy = cfg.continuousTrading ? durationSec : durationSec * cfg.liquidationRatio;
@@ -84,6 +84,18 @@ export function computeRates(cfg: VolumeConfig, initialBalance: number): Rates {
     sellRate: targetSell / durationSec,
     largeBuyThreshold: 0.08 * initialBalance,
   };
+}
+
+/**
+ * Per-window trade interval [lo, hi] in seconds, scaled so realized volume
+ * tracks the target multiple: higher target → more frequent trades. Calibrated
+ * via the offline backtester (scripts/volume-sim.ts) for the ~8–15× range over
+ * a 24h window. The matching loop cadence (BOT_INTERVAL) must be ≤ lo, or the
+ * tick rate clamps the high-target end.
+ */
+export function windowIntervals(multiple: number): [number, number] {
+  const avg = clamp(3200 - 174 * multiple, 480, 4000);
+  return [Math.max(60, Math.round(0.13 * avg)), Math.round(1.87 * avg)];
 }
 
 export function portfolioValue(pf: Portfolio): number {
@@ -111,7 +123,7 @@ export function decideBuy(
   timeElapsed: number,
   nextDt: number,
 ): Intent[] {
-  const r = computeRates(cfg, prog.initialBalance);
+  const r = computeRates(cfg, prog.initialBalance, prog.targetMultiple);
   if (timeElapsed >= r.tStopBuy) return [];
 
   // 1. PI controller for target buy volume.
@@ -246,7 +258,7 @@ function sellContinuous(
   const active = pf.tokenIds.filter((t) => (pf.holdings.get(t) ?? 0) > 0);
   if (!active.length) return [];
 
-  const r = computeRates(cfg, prog.initialBalance);
+  const r = computeRates(cfg, prog.initialBalance, prog.targetMultiple);
   const volError = timeElapsed * r.sellRate - prog.cumulativeSellVolume;
   let targetSellSize = nextDt * r.sellRate + 0.35 * volError;
   if (targetSellSize <= 0) targetSellSize = (pv - pf.cash) * uniform(cfg.sellPctRange);
@@ -287,7 +299,7 @@ function sellPhased(
   timeElapsed: number,
   nextDt: number,
 ): Intent[] {
-  const r = computeRates(cfg, prog.initialBalance);
+  const r = computeRates(cfg, prog.initialBalance, prog.targetMultiple);
   const out: Intent[] = [];
 
   if (timeElapsed >= r.tStopBuy) {
@@ -347,12 +359,17 @@ export function freshProgress(
   dryRun: boolean,
 ): VolumeProgress {
   const rand = (r: [number, number]) => r[0] + Math.random() * (r[1] - r[0]);
+  // Each (repeat) window picks a fresh random integer multiple in [10, 15];
+  // the trade cadence is scaled to that target so realized volume tracks it.
+  const targetMultiple = randint(10, 15);
+  const iv = windowIntervals(targetMultiple);
   return {
     phase: "trading",
     initialBalance,
+    targetMultiple,
     startedAt: new Date(now).toISOString(),
-    nextBuyAt: new Date(now + rand(cfg.buyIntervalSec) * 1000).toISOString(),
-    nextSellAt: new Date(now + rand(cfg.sellIntervalSec) * 1000).toISOString(),
+    nextBuyAt: new Date(now + rand(iv) * 1000).toISOString(),
+    nextSellAt: new Date(now + rand(iv) * 1000).toISOString(),
     cumulativeBuyVolume: 0,
     cumulativeSellVolume: 0,
     cashErrorIntegral: 0,

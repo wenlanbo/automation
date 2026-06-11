@@ -138,6 +138,9 @@ export interface VolumeProgress {
   phase: "trading" | "done";
   /** Wallet capital at window start — drives volume rates + thresholds. */
   initialBalance: number;
+  /** This window's target volume multiple. Set per window (randomized for
+   * repeat windows); falls back to config when absent (legacy windows). */
+  targetMultiple?: number;
   startedAt: string;
   /** ISO of next scheduled buy/sell event (gates the randomized cadence). */
   nextBuyAt: string;
