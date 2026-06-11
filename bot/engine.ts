@@ -7,7 +7,6 @@ import type { BotState, MarketSnapshot, Outcome, Position, StrategyConfig } from
 import { passesEntry } from "./rules.ts";
 import * as chain from "./chain.ts";
 import * as notify from "./notify.ts";
-import { campaignSummary } from "./campaign.ts";
 import { inCooldown, totalExposure, walletSlot } from "./state.ts";
 import type { ManagedWallet } from "./wallets.ts";
 
@@ -83,6 +82,18 @@ export async function runCycle(
 
   for (const w of wallets) {
     const ws = walletSlot(state, w.id);
+
+    // Skip wallets managed by an active campaign leg or volume-strategy window —
+    // those engines own the wallet, so the rules engine must never double-trade it.
+    const campaignLeg = state.campaign?.[w.id];
+    const volumeLeg = state.volume?.[w.id];
+    if ((campaignLeg && campaignLeg.phase !== "done") || (volumeLeg && volumeLeg.phase !== "done")) {
+      summary.openPositions += ws.positions.length;
+      summary.exposureUsdt += totalExposure(ws);
+      summary.realizedPnlUsdt += ws.realizedPnlUsdt;
+      continue;
+    }
+
     if (ws.armed) summary.armedWallets++;
     const tag = `[${rc.dryRun ? "DRY" : "LIVE"}|${w.label}]`;
 
@@ -198,35 +209,4 @@ export async function runCycle(
 
   state.lastRun = new Date(now).toISOString();
   return summary;
-}
-
-/** Decide + send a heartbeat if the interval has elapsed. */
-export async function maybeHeartbeat(
-  rc: RuntimeConfig,
-  state: BotState,
-  snapshot: MarketSnapshot,
-  summary: CycleSummary,
-): Promise<void> {
-  const now = Date.now();
-  const last = state.lastHeartbeat ? new Date(state.lastHeartbeat).getTime() : 0;
-  if (now - last < rc.heartbeatSec * 1000) return;
-  const byCap = [...snapshot.outcomes].sort((a, b) => b.marketCap - a.marketCap);
-  const top = byCap[0];
-  // Top 3 outcomes by market cap, for a richer market summary.
-  const topLines = byCap
-    .slice(0, 3)
-    .map((o) => `   - ${o.name}: ${o.price.toFixed(4)} (cap ${o.marketCap.toFixed(0)})`);
-  await notify.heartbeat({
-    question: snapshot.question,
-    status: snapshot.status,
-    totalMarketCap: snapshot.totalMarketCap,
-    volume: snapshot.volume,
-    openPositions: summary.openPositions,
-    exposureUsdt: summary.exposureUsdt,
-    realizedPnlUsdt: summary.realizedPnlUsdt,
-    armedWallets: summary.armedWallets,
-    topOutcome: top ? { name: top.name, price: top.price } : undefined,
-    extraLines: [...topLines, ...campaignSummary(state)],
-  });
-  state.lastHeartbeat = new Date(now).toISOString();
 }

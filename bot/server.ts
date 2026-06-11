@@ -6,7 +6,8 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { loadRuntime, loadStrategy } from "./config.ts";
 import { initRead } from "./chain.ts";
-import { initNotify, error as notifyError, info as notifyInfo } from "./notify.ts";
+import { initNotify, error as notifyError, info as notifyInfo, message as notifyMessage } from "./notify.ts";
+import { buildPortfolioSummary } from "./reviews.ts";
 import { buildWallets } from "./wallets.ts";
 import { buildPortfolio } from "./portfolio.ts";
 import { oneCycle, type CycleResult } from "./orchestrator.ts";
@@ -135,6 +136,40 @@ const server = Bun.serve({
       return json({ wallets: portfolios });
     }
 
+    // Send the live portfolio summary to Slack (dashboard "Send summary" button).
+    if (pathname === "/api/report" && req.method === "POST") {
+      const snap = latest?.snapshot;
+      if (!snap) return json({ error: "warming up" }, 503);
+      const summary = await buildPortfolioSummary(rc, state, snap, wallets);
+      await notifyMessage(summary);
+      return json({ ok: true });
+    }
+
+    // Automation status (drives the dashboard's paused banner / Resume button).
+    if (pathname === "/api/automation") {
+      return json({ paused: state.paused ?? null, dryRun: rc.dryRun });
+    }
+
+    // Resume the volume strategy after an error-pause. Shifts each still-trading
+    // wallet's window clock forward by the pause duration so it keeps its full
+    // remaining trading window (and trades don't all fire at once on resume).
+    if (pathname === "/api/resume" && req.method === "POST") {
+      if (!state.paused) return json({ ok: true, resumed: false });
+      const shiftMs = Math.max(0, Date.now() - new Date(state.paused.at).getTime());
+      const bump = (iso: string) => new Date(new Date(iso).getTime() + shiftMs).toISOString();
+      for (const p of Object.values(state.volume ?? {})) {
+        if (p.phase !== "trading") continue;
+        p.startedAt = bump(p.startedAt);
+        p.nextBuyAt = bump(p.nextBuyAt);
+        p.nextSellAt = bump(p.nextSellAt);
+      }
+      const reason = state.paused.reason;
+      delete state.paused;
+      saveState(rc.statePath, state);
+      await notifyInfo(`▶️ Volume automation RESUMED (was paused: ${reason}). Window clocks shifted +${Math.round(shiftMs / 60000)}m.`);
+      return json({ ok: true, resumed: true });
+    }
+
     const armMatch = pathname.match(/^\/api\/wallets\/([^/]+)\/arm$/);
     if (armMatch && req.method === "POST") {
       const id = armMatch[1];
@@ -157,6 +192,18 @@ console.log(
     `  market=${rc.targetMarket}\n  wallets=${wallets.length}  dryRun=${rc.dryRun}  interval=${rc.intervalSec}s\n`,
 );
 await notifyInfo(`Bot online. Market ${rc.targetMarket.slice(0, 10)}…, ${wallets.length} wallet(s) loaded (all SAFE until armed).`);
+
+// 24/7 resilience: never let a stray async error kill the long-running process.
+// Each cycle already has its own try/catch (tick); these catch anything escaping
+// fire-and-forget promises (e.g. a failed Slack post) so the loop keeps going.
+process.on("unhandledRejection", (reason) => {
+  console.error("unhandledRejection:", reason);
+  void notifyError(`unhandledRejection: ${reason instanceof Error ? reason.message : String(reason)}`).catch(() => {});
+});
+process.on("uncaughtException", (err) => {
+  console.error("uncaughtException:", err);
+  void notifyError(`uncaughtException: ${err.message}`).catch(() => {});
+});
 
 // kick off the loop
 await tick();

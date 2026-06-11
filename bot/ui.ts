@@ -32,7 +32,9 @@ export function dashboardHtml(opts: { dryRun: boolean; market: string }): string
   .pos { color:var(--green); } .neg { color:var(--red); } .mut { color:var(--muted); }
   .wallet-head { display:flex; align-items:center; gap:14px; cursor:pointer; flex-wrap:wrap; }
   .wallet-head .label { font-weight:600; font-size:15px; }
-  .wallet-head .addr { color:var(--muted); font-family:ui-monospace,monospace; font-size:12px; }
+  .wallet-head .addr { color:var(--muted); font-family:ui-monospace,monospace; font-size:12px;
+                       cursor:pointer; border-bottom:1px dashed var(--line); }
+  .wallet-head .addr:hover { color:var(--accent); border-bottom-color:var(--accent); }
   .spacer { flex:1; }
   .mini { font-size:12px; color:var(--muted); }
   .switch { position:relative; width:46px; height:24px; flex:0 0 auto; }
@@ -55,6 +57,9 @@ export function dashboardHtml(opts: { dryRun: boolean; market: string }): string
   .err { color:var(--red); font-size:13px; min-height:18px; }
   a { color:var(--accent); }
   .ts { color:var(--muted); font-size:11px; }
+  .paused-card { border-color:var(--red); background:#2a1416; }
+  .paused-card .hl { color:var(--red); font-weight:700; font-size:15px; }
+  #resumeBtn { background:var(--green); color:#05080d; }
 </style>
 </head>
 <body>
@@ -77,6 +82,10 @@ export function dashboardHtml(opts: { dryRun: boolean; market: string }): string
 </div>
 
 <main id="app" style="display:none">
+  <div id="automation"></div>
+  <div id="toolbar" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap">
+    <button id="reportBtn">📋 Send summary to Slack</button>
+  </div>
   <div class="card" id="market"></div>
   <div id="wallets"></div>
 </main>
@@ -134,8 +143,23 @@ function renderWallets(ws){
     const cb = document.getElementById("arm-"+w.id);
     if(cb) cb.addEventListener("change", ()=>toggleArm(w.id, cb.checked, cb));
     const head = document.getElementById("head-"+w.id);
-    if(head) head.addEventListener("click",(e)=>{ if(e.target.closest(".arm-wrap"))return; toggleBody(w.id); });
+    if(head) head.addEventListener("click",(e)=>{ if(e.target.closest(".arm-wrap")||e.target.closest(".addr"))return; toggleBody(w.id); });
+    const ad = document.getElementById("addr-"+w.id);
+    if(ad) ad.addEventListener("click",(e)=>{ e.stopPropagation(); copyAddr(ad); });
   });
+}
+async function copyAddr(el){
+  const addr = el.dataset.addr, orig = el.textContent;
+  try { await navigator.clipboard.writeText(addr); }
+  catch(_){ try { prompt("Copy address:", addr); return; } catch(__){ return; } }
+  el.textContent = "copied ✓"; setTimeout(()=>{ el.textContent = orig; }, 1200);
+}
+async function sendReport(){
+  const b = $("#reportBtn"); if(!b) return; const orig = b.textContent;
+  b.disabled = true; b.textContent = "Sending…";
+  try { await api("/api/report",{method:"POST"}); b.textContent = "Sent to Slack ✓"; }
+  catch(e){ b.textContent = "Failed"; alert("Failed: "+e.message); }
+  setTimeout(()=>{ b.disabled = false; b.textContent = orig; }, 2500);
 }
 
 function walletCard(w){
@@ -147,7 +171,7 @@ function walletCard(w){
   ).join("") : '<tr><td colspan="7" class="empty">No open positions</td></tr>';
   return '<div class="card"><div class="wallet-head" id="head-'+w.id+'">'+
     '<span class="label">'+escape(w.label)+'</span>'+
-    '<span class="addr">'+w.address.slice(0,8)+'…'+w.address.slice(-6)+'</span>'+
+    '<span class="addr" id="addr-'+w.id+'" data-addr="'+w.address+'" title="Click to copy full address">'+w.address.slice(0,8)+'…'+w.address.slice(-6)+'</span>'+
     '<span class="spacer"></span>'+
     '<span class="mini">BNB '+fmt(w.bnb,4)+' · USDT '+fmt(w.usdt,2)+'</span>'+
     '<span class="mini">pos '+fmt(w.positionValueUsdt,2)+' · rPnL <span class="'+cls(w.realizedPnlUsdt)+'">'+sign(w.realizedPnlUsdt,2)+'</span></span>'+
@@ -175,14 +199,34 @@ async function toggleArm(id, armed, cb){
 function stat(k,v){ return '<div class="stat"><div class="k">'+k+'</div><div class="v">'+v+'</div></div>'; }
 function escape(s){ return String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 
+function renderAutomation(a){
+  const el = $("#automation"); if(!el) return;
+  if (a && a.paused) {
+    el.innerHTML = '<div class="card paused-card"><div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">'+
+      '<span class="hl">⛔ Automation paused</span>'+
+      '<span class="mini">'+escape(a.paused.reason)+'</span>'+
+      '<span class="ts">since '+new Date(a.paused.at).toLocaleString()+'</span>'+
+      '<span class="spacer"></span>'+
+      '<button id="resumeBtn">Resume automation</button></div></div>';
+    const b = $("#resumeBtn"); if(b) b.addEventListener("click", resume);
+  } else { el.innerHTML = ""; }
+}
+async function resume(){
+  const b = $("#resumeBtn"); if(b){ b.disabled=true; b.textContent="Resuming…"; }
+  try { await api("/api/resume",{method:"POST"}); }
+  catch(e){ alert("Resume failed: "+e.message); }
+  refresh();
+}
+
 async function refresh(){
   try {
-    const [m, w] = await Promise.all([api("/api/market"), api("/api/wallets")]);
-    showApp(); renderMarket(m); renderWallets(w.wallets);
+    const [m, w, a] = await Promise.all([api("/api/market"), api("/api/wallets"), api("/api/automation")]);
+    showApp(); renderAutomation(a); renderMarket(m); renderWallets(w.wallets);
   } catch(e){ /* 401 handled in api() */ }
 }
 
 $("#loginBtn").addEventListener("click", login);
+$("#reportBtn").addEventListener("click", sendReport);
 $("#pw").addEventListener("keydown",(e)=>{ if(e.key==="Enter") login(); });
 $("#logout").addEventListener("click", async()=>{ await fetch("/api/logout",{method:"POST"}); showLogin(); });
 refresh();

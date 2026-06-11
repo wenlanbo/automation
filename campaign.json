@@ -1,5 +1,5 @@
 {
-  "enabled": true,
+  "enabled": false,
   "sellChunks": 10,
   "sellEverySec": 290,
   "slippagePct": 3,

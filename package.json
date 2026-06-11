@@ -18,7 +18,8 @@
     "bot:run": "bun bot/bot.ts run",
     "bot:scan": "bun bot/bot.ts scan",
     "bot:status": "bun bot/bot.ts status",
-    "bot:arm": "bun bot/bot.ts arm"
+    "bot:arm": "bun bot/bot.ts arm",
+    "vol:sim": "bun scripts/volume-sim.ts"
   },
   "dependencies": {
     "viem": "^2.21.0"

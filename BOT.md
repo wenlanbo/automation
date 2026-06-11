@@ -109,9 +109,14 @@ Operators: `>` `>=` `<` `<=` `==` `abs>` `abs<`. `combine`: `"all"` or `"any"`.
 Set `SLACK_WEBHOOK` (an incoming-webhook URL). You get:
 - 🚨 **errors** — failed cycles or trades (with the reason)
 - ⚠️ **warnings** — low gas, finalised market, skipped buys
-- 💓 **heartbeat** — every `HEARTBEAT_INTERVAL` sec: market cap/volume, leading
-  outcome, armed wallets, open positions, exposure, realized PnL
-- ℹ️ **info** — bot online, wallet armed/disarmed
+- 📊 **market-volume update** — every `MARKET_INTERVAL` sec (default 1800 = 30 min):
+  total market volume + the change since the last update, market cap, top outcomes,
+  and per-engine progress. (Replaces the old market-summary heartbeat.)
+- 💼 **portfolio review** — every `PORTFOLIO_INTERVAL` sec (default 3600 = 1 h): one
+  message per *trading* wallet with its real on-chain holdings (or paper ledger in
+  dry-run) valued at live price, cash, gas, volume done, and P&L.
+- 🟢🔴 **trade fills** — every buy/sell from the campaign + volume engines
+- ℹ️ **info** — bot online, wallet armed/disarmed, window started/complete
 
 ## Deploy on Railway
 
@@ -125,8 +130,8 @@ The server is one long-running process (dashboard + loop).
    - `DASHBOARD_PASSWORD` (required before exposing publicly)
    - `SLACK_WEBHOOK`
    - `DRY_RUN=true` to start — flip to `false` when ready
-   - optional: `BSC_RPC` (private RPC recommended), `BOT_INTERVAL`, `HEARTBEAT_INTERVAL`,
-     `TARGET_MARKET`, `INTEGRATOR_ADDRESS` / `INTEGRATOR_FEE_BPS`
+   - optional: `BSC_RPC` (private RPC recommended), `BOT_INTERVAL`, `MARKET_INTERVAL`,
+     `PORTFOLIO_INTERVAL`, `TARGET_MARKET`, `INTEGRATOR_ADDRESS` / `INTEGRATOR_FEE_BPS`
 4. Railway injects `PORT`; the server binds it automatically. The public URL serves
    the dashboard; `/healthz` is the health check.
 

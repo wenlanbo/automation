@@ -129,13 +129,57 @@ export interface CampaignProgress {
   lastSellTx?: string;
 }
 
+/**
+ * Per-wallet progress for the volume-generation strategy (port of the quant's
+ * WorldCupTradingStrategy). Holdings/cash come from chain when live; in dry-run
+ * they live in `paper`. Only the controller state + schedule are persisted.
+ */
+export interface VolumeProgress {
+  phase: "trading" | "done";
+  /** Wallet capital at window start — drives volume rates + thresholds. */
+  initialBalance: number;
+  startedAt: string;
+  /** ISO of next scheduled buy/sell event (gates the randomized cadence). */
+  nextBuyAt: string;
+  nextSellAt: string;
+  cumulativeBuyVolume: number;
+  cumulativeSellVolume: number;
+  /** PI cash-controller integrated error (hours), windup-limited. */
+  cashErrorIntegral: number;
+  /** Cascade-sell sequence triggered after a large buy. */
+  cascadeSellsRemaining: number;
+  cascadeSellAmount: number;
+  cascadeSellTokenId: number | null;
+  nextSellIsLarge: boolean;
+  lastLargeBuyAmount: number;
+  trades: number;
+  windowsDone: number;
+  /** Non-continuous mode: per-token OT held when the liquidation phase began. */
+  liqStartHoldings?: Record<string, number>;
+  /** Dry-run only: simulated cash (USDT) + holdings (tokenId -> OT wei string). */
+  paper?: { cash: number; holdings: Record<string, string> };
+}
+
 export interface BotState {
   /** Keyed by wallet id (label-derived or address). */
   wallets: Record<string, WalletState>;
   /** Distribute-out campaign progress, keyed by walletId. */
   campaign?: Record<string, CampaignProgress>;
+  /** Volume-generation strategy progress, keyed by walletId. */
+  volume?: Record<string, VolumeProgress>;
   lastRun: string | null;
-  lastHeartbeat: string | null;
+  /** ISO of the last 30-min market-volume review (+ the volume seen then). */
+  lastMarketReview?: string;
+  lastMarketVolume?: number;
+  /** ISO of the last hourly per-wallet portfolio review. */
+  lastPortfolioReview?: string;
+  /** When set, the volume strategy is paused (set on error) until resumed from
+   * the dashboard. Trading halts; reviews keep running. */
+  paused?: { reason: string; at: string };
+  /** Guards the one-time "volume test complete" @here Slack alert. */
+  volumeDoneAlerted?: boolean;
+  /** Per-wallet gas-runway tracking for the 6h-ahead low-BNB alert. */
+  gasWatch?: Record<string, { bnb: number; at: string; alertedAt?: string }>;
 }
 
 /** Live wallet runtime info (not persisted — keys live only in memory). */

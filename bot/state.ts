@@ -3,7 +3,7 @@ import { existsSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import type { BotState, WalletState } from "./types.ts";
 
 function emptyState(): BotState {
-  return { wallets: {}, lastRun: null, lastHeartbeat: null };
+  return { wallets: {}, lastRun: null };
 }
 
 function emptyWallet(): WalletState {

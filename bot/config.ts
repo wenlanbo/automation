@@ -49,7 +49,10 @@ export interface RuntimeConfig {
   targetMarket: string;
   restBase: string;
   intervalSec: number;
-  heartbeatSec: number;
+  /** Cadence of the market-volume update to Slack (seconds). */
+  marketReviewSec: number;
+  /** Cadence of the per-wallet portfolio review to Slack (seconds). */
+  portfolioReviewSec: number;
   statePath: string;
   configPath: string;
   integratorAddress?: string;
@@ -168,7 +171,10 @@ export function loadRuntime(): RuntimeConfig {
     targetMarket,
     restBase: env.REST_BASE ?? "https://rest.ft.42.space",
     intervalSec: env.BOT_INTERVAL ? parseInt(env.BOT_INTERVAL, 10) : 300,
-    heartbeatSec: env.HEARTBEAT_INTERVAL ? parseInt(env.HEARTBEAT_INTERVAL, 10) : 3600,
+    // Market-volume update: every 30 min (falls back to legacy HEARTBEAT_INTERVAL).
+    marketReviewSec: parseInt(env.MARKET_INTERVAL ?? env.HEARTBEAT_INTERVAL ?? "1800", 10),
+    // Per-wallet portfolio review: hourly.
+    portfolioReviewSec: parseInt(env.PORTFOLIO_INTERVAL ?? "3600", 10),
     statePath: resolve(env.BOT_STATE_PATH ?? "bot-state.json"),
     configPath: resolve(env.BOT_CONFIG_PATH ?? "strategy.config.json"),
     integratorAddress,
