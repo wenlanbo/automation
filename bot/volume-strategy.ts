@@ -98,6 +98,11 @@ export function windowIntervals(multiple: number): [number, number] {
   return [Math.max(60, Math.round(0.13 * avg)), Math.round(1.87 * avg)];
 }
 
+/** Cadence for a window: explicit override if set, else target-scaled. */
+export function effectiveIntervals(cfg: VolumeConfig, multiple: number): [number, number] {
+  return cfg.intervalOverrideSec ?? windowIntervals(multiple);
+}
+
 export function portfolioValue(pf: Portfolio): number {
   let assets = 0;
   for (const t of pf.tokenIds) assets += (pf.holdings.get(t) ?? 0) * (pf.prices.get(t) ?? 0);
@@ -362,7 +367,7 @@ export function freshProgress(
   // Each (repeat) window picks a fresh random integer multiple in [10, 15];
   // the trade cadence is scaled to that target so realized volume tracks it.
   const targetMultiple = randint(10, 15);
-  const iv = windowIntervals(targetMultiple);
+  const iv = effectiveIntervals(cfg, targetMultiple);
   return {
     phase: "trading",
     initialBalance,

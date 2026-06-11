@@ -17,7 +17,7 @@ import {
   decideSell,
   forceLiquidation,
   freshProgress,
-  windowIntervals,
+  effectiveIntervals,
   type Intent,
   type Portfolio,
 } from "./volume-strategy.ts";
@@ -347,7 +347,7 @@ export async function runVolumeStrategy(
 
       const rand = (a: [number, number]) => a[0] + Math.random() * (a[1] - a[0]);
       // Trade cadence scaled to this window's target multiple (higher → faster).
-      const iv = windowIntervals(prog.targetMultiple ?? cfg.targetVolumeMultiple);
+      const iv = effectiveIntervals(cfg, prog.targetMultiple ?? cfg.targetVolumeMultiple);
 
       // BUY event.
       if (now >= new Date(prog.nextBuyAt).getTime()) {

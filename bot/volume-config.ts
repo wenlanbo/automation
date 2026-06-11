@@ -35,6 +35,9 @@ export interface VolumeConfig {
   buyIntervalSec: [number, number];
   /** Randomized sell interval [min, max] seconds. */
   sellIntervalSec: [number, number];
+  /** Hard override for the per-window trade cadence [min,max] seconds. When set,
+   * bypasses the target-scaled windowIntervals (used for max-throughput sprints). */
+  intervalOverrideSec?: [number, number];
   /** Fallback buy size as a fraction of cash [min, max]. */
   buyPctRange: [number, number];
   /** Fallback sell size as a fraction of holdings [min, max]. */

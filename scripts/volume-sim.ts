@@ -15,6 +15,7 @@ import {
   freshProgress,
   portfolioValue,
   windowIntervals,
+  effectiveIntervals,
   type Intent,
   type Portfolio,
 } from "../bot/volume-strategy.ts";
@@ -66,7 +67,7 @@ function runOne(cfg: VolumeConfig, balance: number): { volume: number; cashRatio
   const prog = freshProgress(cfg, balance, 0, false);
   prog.targetMultiple = cfg.targetVolumeMultiple; // test the requested multiple, not the random one
   const r = computeRates(cfg, balance, prog.targetMultiple);
-  const iv = windowIntervals(prog.targetMultiple); // target-scaled cadence
+  const iv = effectiveIntervals(cfg, prog.targetMultiple); // override or target-scaled
   const tick = parseInt(process.env.TICK_SEC ?? "60", 10); // mimic BOT_INTERVAL clamp
   const rand = (a: [number, number]) => Math.max(tick, a[0] + Math.random() * (a[1] - a[0]));
 
