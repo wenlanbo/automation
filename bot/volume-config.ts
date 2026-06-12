@@ -31,6 +31,8 @@ export interface VolumeConfig {
   minOrderUsdt: number;
   /** Slippage tolerance for on-chain execution (percent). */
   slippagePct: number;
+  /** Retries for a reverted/failed trade (fresh quote each time) before pausing. */
+  maxTradeRetries: number;
   /** Randomized buy interval [min, max] seconds. */
   buyIntervalSec: [number, number];
   /** Randomized sell interval [min, max] seconds. */
@@ -65,6 +67,7 @@ export const DEFAULT_VOLUME_CONFIG: VolumeConfig = {
   liquidationRatio: 0.8,
   minOrderUsdt: 1.0,
   slippagePct: 3,
+  maxTradeRetries: 5,
   buyIntervalSec: [300, 7200],
   sellIntervalSec: [300, 7200],
   buyPctRange: [0.1, 0.3],

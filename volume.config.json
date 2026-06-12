@@ -1,7 +1,7 @@
 {
   "enabled": true,
   "durationHours": 24,
-  "targetVolumeMultiple": 42,
+  "targetVolumeMultiple": 60,
   "continuousTrading": true,
   "forceLiquidationAtEnd": true,
   "targetCashRatio": 0.1,
@@ -9,6 +9,7 @@
   "liquidationRatio": 0.8,
   "minOrderUsdt": 1.0,
   "slippagePct": 3,
+  "maxTradeRetries": 5,
   "buyIntervalSec": [120, 900],
   "sellIntervalSec": [120, 900],
   "buyPctRange": [0.1, 0.3],

@@ -118,9 +118,25 @@ async function execBuy(ctx: Ctx, tokenId: number, usdt: number): Promise<void> {
     return;
   }
   buy = Math.floor(buy * 1e6) / 1e6; // never request above balance
-  const sim = await retry(() => chain.simulateBuy(ctx.market, tokenId, buy));
+  // Retry a reverted/failed buy up to maxTradeRetries with a FRESH quote each
+  // time (a revert is usually slippage; re-simulating recomputes the min-out).
+  // Only after all attempts fail does the error propagate and pause the strategy.
+  const tries = cfg.maxTradeRetries ?? 5;
+  let sim!: Awaited<ReturnType<typeof chain.simulateBuy>>;
+  let lastErr: unknown = null;
+  for (let a = 1; a <= tries; a++) {
+    try {
+      sim = await chain.simulateBuy(ctx.market, tokenId, buy);
+      if (!rc.dryRun) await chain.executeBuy(ctx.w.signer, ctx.market, tokenId, buy, cfg.slippagePct, sim);
+      lastErr = null;
+      break;
+    } catch (e) {
+      lastErr = e;
+      if (a < tries) await new Promise((r) => setTimeout(r, 700 * a));
+    }
+  }
+  if (lastErr) throw new Error(`buy ${tokenId} failed after ${tries} tries: ${(lastErr as Error).message}`);
   const cost = sim.costUsdt + sim.feeUsdt;
-  if (!rc.dryRun) await chain.executeBuy(ctx.w.signer, ctx.market, tokenId, buy, cfg.slippagePct, sim);
 
   // Reconcile in-memory portfolio from the realized fill.
   ctx.pf.cash -= cost;
@@ -157,8 +173,22 @@ async function execSell(ctx: Ctx, tokenId: number, usdt: number, reason: string)
   }
   if (otWei <= 0n) return;
 
-  const sim = await retry(() => chain.simulateSell(ctx.market, tokenId, otWei));
-  if (!rc.dryRun) await chain.executeSell(ctx.w.signer, ctx.market, tokenId, otWei, cfg.slippagePct, sim);
+  // Retry a reverted/failed sell up to maxTradeRetries with a fresh quote each time.
+  const tries = cfg.maxTradeRetries ?? 5;
+  let sim!: Awaited<ReturnType<typeof chain.simulateSell>>;
+  let lastErr: unknown = null;
+  for (let a = 1; a <= tries; a++) {
+    try {
+      sim = await chain.simulateSell(ctx.market, tokenId, otWei);
+      if (!rc.dryRun) await chain.executeSell(ctx.w.signer, ctx.market, tokenId, otWei, cfg.slippagePct, sim);
+      lastErr = null;
+      break;
+    } catch (e) {
+      lastErr = e;
+      if (a < tries) await new Promise((r) => setTimeout(r, 700 * a));
+    }
+  }
+  if (lastErr) throw new Error(`sell ${tokenId} failed after ${tries} tries: ${(lastErr as Error).message}`);
 
   ctx.pf.cash += sim.collateralUsdt;
   ctx.weiByToken.set(tokenId, holdingWei - otWei);
@@ -176,8 +206,8 @@ async function execSell(ctx: Ctx, tokenId: number, usdt: number, reason: string)
   await notify.message(line);
 }
 
-// Errors propagate to the per-wallet handler, which pauses the whole strategy
-// (per the "pause on any error" requirement) rather than skipping one trade.
+// A trade that still fails after maxTradeRetries throws here; the per-wallet
+// handler then pauses the whole strategy (so only persistent failures pause).
 async function execIntents(ctx: Ctx, intents: Intent[]): Promise<void> {
   for (const it of intents) {
     if (it.type === "BUY") await execBuy(ctx, it.tokenId, it.usdt);
