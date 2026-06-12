@@ -159,14 +159,14 @@ const server = Bun.serve({
       } catch {
         return json({ error: "invalid 'to' address" }, 400);
       }
-      if (withdrawing) return json({ error: "withdraw already in progress" }, 409);
+      if (withdrawing) return json({ error: "drain already in progress" }, 409);
       withdrawing = true;
       state.paused = { reason: `withdraw to ${to}`, at: new Date().toISOString() };
       saveState(rc.statePath, state);
       void (async () => {
         try {
           for (let i = 0; i < 90 && running; i++) await new Promise((r) => setTimeout(r, 1000));
-          await withdrawAll(rc, wallets, to);
+          await withdrawAll(rc, wallets, { to });
         } catch (e) {
           await notifyError(`withdraw failed: ${(e as Error).message}`);
         } finally {
@@ -174,6 +174,27 @@ const server = Bun.serve({
         }
       })();
       return json({ ok: true, started: true, to });
+    }
+
+    // Liquidate-only: pause, then sell all positions to USDT (kept in wallets).
+    if (pathname === "/api/liquidate" && req.method === "POST") {
+      const body = (await req.json().catch(() => ({}))) as { confirm?: boolean };
+      if (!body.confirm) return json({ error: "confirm:true required" }, 400);
+      if (withdrawing) return json({ error: "drain already in progress" }, 409);
+      withdrawing = true;
+      state.paused = { reason: "liquidate to USDT", at: new Date().toISOString() };
+      saveState(rc.statePath, state);
+      void (async () => {
+        try {
+          for (let i = 0; i < 90 && running; i++) await new Promise((r) => setTimeout(r, 1000));
+          await withdrawAll(rc, wallets, {});
+        } catch (e) {
+          await notifyError(`liquidate failed: ${(e as Error).message}`);
+        } finally {
+          withdrawing = false;
+        }
+      })();
+      return json({ ok: true, started: true });
     }
 
     // Send the live portfolio summary to Slack (dashboard "Send summary" button).

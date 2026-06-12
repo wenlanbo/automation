@@ -1,11 +1,9 @@
-// Fund-retrieval ("drain") routine. For each wallet, in order:
-//   1. sell ALL outcome positions back to USDT (retrying smaller on revert to
-//      absorb price impact on thin outcomes),
-//   2. transfer the full USDT balance to the destination,
-//   3. transfer (almost) all BNB to the destination — last, since the USDT
-//      transfer above needs BNB for gas.
+// Fund-retrieval / liquidation routine. Two modes via opts.to:
+//   • liquidate-only (no `to`): sell ALL positions back to USDT, keep cash in the wallets.
+//   • full withdraw (`to` set): liquidate, then send USDT then BNB to `to`
+//     (BNB last, since the USDT transfer needs gas).
 // Runs inside the server process (which owns the signers) AFTER the strategy is
-// paused, so it never races the trading loop for nonces. Progress → Slack.
+// paused, so it never races the trading loop for nonces. Progress → Slack + logs.
 import { formatUnits, getAddress, type Address } from "viem";
 import type { RuntimeConfig } from "./config.ts";
 import * as chain from "./chain.ts";
@@ -16,26 +14,32 @@ const TICK_WEI = 10n ** 16n; // 0.01 OT
 const floorTick = (wei: bigint) => wei - (wei % TICK_WEI);
 const f = (n: number, d = 2) => n.toLocaleString("en-US", { maximumFractionDigits: d });
 
-/** Sell a full position, halving on revert (price impact) down to a floor. */
+async function readHolding(market: Address, addr: Address, tokenId: number): Promise<bigint> {
+  const us = await chain.getUserState(market, addr);
+  return us.holdings.find((h) => h.tokenId === tokenId)?.otHolding ?? 0n;
+}
+
+/** Sell a full position to USDT, halving on revert (price impact) down to a floor.
+ *  Returns USDT received (from the sims). */
 async function liquidatePosition(
+  rc: RuntimeConfig,
   w: ManagedWallet,
   market: Address,
   tokenId: number,
-  name: string,
   slippagePct: number,
 ): Promise<number> {
-  let remaining = floorTick((await readHolding(market, w.address, tokenId)));
+  const addr = getAddress(w.address) as Address;
+  let remaining = floorTick(await readHolding(market, addr, tokenId));
   let gotUsdt = 0;
-  let attempts = 0;
-  while (remaining > 0n && attempts < 12) {
-    attempts++;
+  let rounds = 0;
+  while (remaining > 0n && rounds < 14) {
+    rounds++;
     let lot = remaining;
     let sold = false;
-    // Try the whole lot; on revert, halve a few times before giving up on this round.
-    for (let h = 0; h < 6 && lot >= TICK_WEI; h++) {
+    for (let h = 0; h < 7 && lot >= TICK_WEI; h++) {
       try {
         const sim = await chain.simulateSell(market, tokenId, lot);
-        await chain.executeSell(w.signer, market, tokenId, lot, slippagePct, sim);
+        if (!rc.dryRun) await chain.executeSell(w.signer, market, tokenId, lot, slippagePct, sim);
         gotUsdt += sim.collateralUsdt;
         sold = true;
         break;
@@ -44,84 +48,86 @@ async function liquidatePosition(
       }
     }
     if (!sold) break;
-    remaining = floorTick(await readHolding(market, getAddress(w.address) as Address, tokenId));
+    if (rc.dryRun) break; // holdings don't change on-chain in dry-run; one pass only
+    remaining = floorTick(await readHolding(market, addr, tokenId));
   }
-  if (remaining > 0n)
-    await notify.warn(`withdraw ${w.label}: ${name} not fully sold (${f(parseFloat(formatUnits(remaining, 18)))} OT dust left)`);
   return gotUsdt;
 }
 
-async function readHolding(market: Address, addr: string, tokenId: number): Promise<bigint> {
-  const us = await chain.getUserState(market, getAddress(addr) as Address);
-  return us.holdings.find((h) => h.tokenId === tokenId)?.otHolding ?? 0n;
+export interface DrainRow {
+  label: string;
+  positionsUsdt: number; // value of positions before liquidation
+  usdtAfterSell: number; // USDT balance after selling (before any transfer)
+  usdtSent: number; // USDT transferred out (full withdraw only)
+  bnbSent: number; // BNB transferred out (full withdraw only)
+  error?: string;
 }
-
-export interface WithdrawResult {
-  to: string;
-  usdtSent: number;
-  bnbSent: number;
-  perWallet: Array<{ label: string; usdt: number; bnb: number; error?: string }>;
+export interface DrainResult {
+  mode: "liquidate" | "withdraw";
+  to?: string;
+  rows: DrainRow[];
 }
 
 export async function withdrawAll(
   rc: RuntimeConfig,
   wallets: ManagedWallet[],
-  to: Address,
-  slippagePct = 12,
-): Promise<WithdrawResult> {
+  opts: { to?: Address; slippagePct?: number },
+): Promise<DrainResult> {
   const market = getAddress(rc.targetMarket) as Address;
-  const result: WithdrawResult = { to, usdtSent: 0, bnbSent: 0, perWallet: [] };
+  const to = opts.to;
+  const slippagePct = opts.slippagePct ?? 12;
+  const result: DrainResult = { mode: to ? "withdraw" : "liquidate", ...(to ? { to } : {}), rows: [] };
 
   await notify.alertHere(
-    `💸 [${notify.tagStr()}] Withdraw started → ${to}\nLiquidating all positions, then sending USDT then BNB from ${wallets.length} wallet(s).`,
+    to
+      ? `💸 [${notify.tagStr()}] Withdraw started → ${to}\nLiquidating all positions, then sending USDT then BNB from ${wallets.length} wallet(s).`
+      : `🧮 [${notify.tagStr()}] Liquidation started — selling ALL positions to USDT across ${wallets.length} wallet(s) (cash kept in wallets).`,
   );
 
   for (const w of wallets) {
     const addr = getAddress(w.address) as Address;
-    const row = { label: w.label, usdt: 0, bnb: 0 } as WithdrawResult["perWallet"][number];
+    const row: DrainRow = { label: w.label, positionsUsdt: 0, usdtAfterSell: 0, usdtSent: 0, bnbSent: 0 };
     try {
-      // 1. Liquidate every held outcome to USDT.
+      // Value + list current positions (getUserState carries a price per token).
       const us = await chain.getUserState(market, addr);
-      for (const h of us.holdings) {
-        if (floorTick(h.otHolding) <= 0n) continue;
-        const name = `#${h.tokenId}`;
-        await liquidatePosition(w, market, h.tokenId, name, slippagePct);
-      }
+      const held = us.holdings.filter((h) => floorTick(h.otHolding) > 0n);
+      row.positionsUsdt = held.reduce((s, h) => s + parseFloat(formatUnits(h.otHolding, 18)) * h.price, 0);
 
-      // 2. Send the full USDT balance.
-      const usdtWei = await chain.usdtBalanceWei(addr);
-      if (usdtWei > 0n) {
-        if (rc.dryRun) {
-          row.usdt = parseFloat(formatUnits(usdtWei, 18));
-        } else {
+      // 1. Sell every position to USDT.
+      for (const h of held) await liquidatePosition(rc, w, market, h.tokenId, slippagePct);
+      row.usdtAfterSell = parseFloat(formatUnits(await chain.usdtBalanceWei(addr), 18));
+
+      // 2/3. Full withdraw only: send USDT then BNB.
+      if (to && !rc.dryRun) {
+        const usdtWei = await chain.usdtBalanceWei(addr);
+        if (usdtWei > 0n) {
           await chain.transferUsdt(w.signer, to, usdtWei);
-          row.usdt = parseFloat(formatUnits(usdtWei, 18));
+          row.usdtSent = parseFloat(formatUnits(usdtWei, 18));
         }
-      }
-
-      // 3. Send (almost) all BNB last (USDT transfer above needed gas).
-      if (!rc.dryRun) {
         const sent = await chain.sendAllBnb(w.signer, to);
-        if (sent) row.bnb = parseFloat(formatUnits(sent.valueWei, 18));
-      } else {
-        const bal = await chain.getBalances(addr);
-        row.bnb = Math.max(0, bal.bnb - 0.0005);
+        if (sent) row.bnbSent = parseFloat(formatUnits(sent.valueWei, 18));
       }
 
-      result.usdtSent += row.usdt;
-      result.bnbSent += row.bnb;
-      await notify.message(
-        `  ✅ ${w.label}: sent ${f(row.usdt)} USDT + ${f(row.bnb, 5)} BNB → ${to.slice(0, 8)}…`,
-      );
+      const line = to
+        ? `  ✅ ${w.label}: sold ${f(row.positionsUsdt)} positions → sent ${f(row.usdtSent)} USDT + ${f(row.bnbSent, 5)} BNB`
+        : `  ✅ ${w.label}: sold ${f(row.positionsUsdt)} positions → USDT balance now ${f(row.usdtAfterSell)}`;
+      console.log("  [withdraw]" + line);
+      await notify.message(line);
     } catch (e) {
       row.error = (e as Error).message;
-      await notify.error(`withdraw ${w.label}: ${row.error}`);
+      await notify.error(`${result.mode} ${w.label}: ${row.error}`);
     }
-    result.perWallet.push(row);
+    result.rows.push(row);
   }
 
-  await notify.alertHere(
-    `✅ [${notify.tagStr()}] Withdraw complete → ${to}\nTotal: ${f(result.usdtSent)} USDT + ${f(result.bnbSent, 5)} BNB across ${wallets.length} wallet(s).`,
-  );
+  const totSold = result.rows.reduce((s, r) => s + r.positionsUsdt, 0);
+  if (to) {
+    const u = result.rows.reduce((s, r) => s + r.usdtSent, 0);
+    const b = result.rows.reduce((s, r) => s + r.bnbSent, 0);
+    await notify.alertHere(`✅ [${notify.tagStr()}] Withdraw complete → ${to}\nSold ${f(totSold)} in positions; sent ${f(u)} USDT + ${f(b, 5)} BNB.`);
+  } else {
+    const cash = result.rows.reduce((s, r) => s + r.usdtAfterSell, 0);
+    await notify.alertHere(`✅ [${notify.tagStr()}] Liquidation complete — sold ${f(totSold)} of positions; wallets now hold ${f(cash)} USDT total.`);
+  }
   return result;
 }
