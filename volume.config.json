@@ -1,7 +1,7 @@
 {
   "enabled": true,
-  "durationHours": 3.5,
-  "targetVolumeMultiple": 24,
+  "durationHours": 24,
+  "targetVolumeMultiple": 18,
   "continuousTrading": true,
   "forceLiquidationAtEnd": true,
   "targetCashRatio": 0.1,
@@ -13,7 +13,7 @@
   "sellIntervalSec": [120, 900],
   "buyPctRange": [0.1, 0.3],
   "sellPctRange": [0.2, 0.6],
-  "repeatWindow": false,
+  "repeatWindow": true,
   "paperBalanceUsdt": 1000,
   "minBnbReserve": 0.005,
   "outcomes": [
