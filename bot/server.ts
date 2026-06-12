@@ -4,10 +4,12 @@
 // Serves the dashboard (market metrics, per-wallet portfolios, arm/disarm),
 // and runs the strategy on a loop. Trades only armed wallets; dry-run safe.
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { getAddress, type Address } from "viem";
 import { loadRuntime, loadStrategy } from "./config.ts";
 import { initRead } from "./chain.ts";
 import { initNotify, error as notifyError, info as notifyInfo, message as notifyMessage } from "./notify.ts";
 import { buildPortfolioSummary } from "./reviews.ts";
+import { withdrawAll } from "./withdraw.ts";
 import { buildWallets } from "./wallets.ts";
 import { buildPortfolio } from "./portfolio.ts";
 import { oneCycle, type CycleResult } from "./orchestrator.ts";
@@ -37,6 +39,7 @@ saveState(rc.statePath, state);
 
 let latest: CycleResult | null = null;
 let running = false;
+let withdrawing = false;
 
 if (!rc.dashboardPassword)
   console.warn("⚠️  DASHBOARD_PASSWORD not set — dashboard is UNAUTHENTICATED. Set it before exposing publicly.");
@@ -72,7 +75,7 @@ const json = (data: unknown, status = 200, headers: Record<string, string> = {})
 
 // ---- background loop ----
 async function tick(): Promise<void> {
-  if (running) return;
+  if (running || withdrawing) return; // never trade while a withdraw is draining wallets
   running = true;
   try {
     latest = await oneCycle(rc, cfg, wallets, state);
@@ -145,6 +148,34 @@ const server = Bun.serve({
       return json({ wallets: portfolios });
     }
 
+    // Retrieve all funds: pause the strategy, then (in the background) sell all
+    // positions and send USDT then BNB to `to`. One drain at a time.
+    if (pathname === "/api/withdraw" && req.method === "POST") {
+      const body = (await req.json().catch(() => ({}))) as { to?: string; confirm?: boolean };
+      if (!body.confirm) return json({ error: "confirm:true required" }, 400);
+      let to: Address;
+      try {
+        to = getAddress(body.to ?? "") as Address;
+      } catch {
+        return json({ error: "invalid 'to' address" }, 400);
+      }
+      if (withdrawing) return json({ error: "withdraw already in progress" }, 409);
+      withdrawing = true;
+      state.paused = { reason: `withdraw to ${to}`, at: new Date().toISOString() };
+      saveState(rc.statePath, state);
+      void (async () => {
+        try {
+          for (let i = 0; i < 90 && running; i++) await new Promise((r) => setTimeout(r, 1000));
+          await withdrawAll(rc, wallets, to);
+        } catch (e) {
+          await notifyError(`withdraw failed: ${(e as Error).message}`);
+        } finally {
+          withdrawing = false;
+        }
+      })();
+      return json({ ok: true, started: true, to });
+    }
+
     // Send the live portfolio summary to Slack (dashboard "Send summary" button).
     if (pathname === "/api/report" && req.method === "POST") {
       const snap = latest?.snapshot;
@@ -156,7 +187,7 @@ const server = Bun.serve({
 
     // Automation status (drives the dashboard's paused banner / Resume button).
     if (pathname === "/api/automation") {
-      return json({ paused: state.paused ?? null, dryRun: rc.dryRun });
+      return json({ paused: state.paused ?? null, dryRun: rc.dryRun, withdrawing });
     }
 
     // Resume the volume strategy after an error-pause. Shifts each still-trading

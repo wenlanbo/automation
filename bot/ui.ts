@@ -83,8 +83,12 @@ export function dashboardHtml(opts: { dryRun: boolean; market: string }): string
 
 <main id="app" style="display:none">
   <div id="automation"></div>
-  <div id="toolbar" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap">
+  <div id="toolbar" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
     <button id="reportBtn">📋 Send summary to Slack</button>
+    <span style="flex:1"></span>
+    <input id="withdrawTo" placeholder="0x destination address"
+           style="width:340px;max-width:60vw;padding:8px;background:#0f141c;border:1px solid var(--line);color:var(--fg);border-radius:8px;font-family:ui-monospace,monospace;font-size:12px" />
+    <button id="withdrawBtn" style="background:var(--red)">💸 Withdraw all funds</button>
   </div>
   <div class="card" id="market"></div>
   <div id="wallets"></div>
@@ -161,6 +165,15 @@ async function sendReport(){
   catch(e){ b.textContent = "Failed"; alert("Failed: "+e.message); }
   setTimeout(()=>{ b.disabled = false; b.textContent = orig; }, 2500);
 }
+async function withdrawAll(){
+  const to = ($("#withdrawTo").value||"").trim();
+  if(!/^0x[0-9a-fA-F]{40}$/.test(to)){ alert("Enter a valid 0x destination address."); return; }
+  if(!confirm("Withdraw ALL funds?\\n\\nThis pauses the bot, sells every position to USDT, and sends USDT then BNB from ALL wallets to:\\n"+to+"\\n\\nThis cannot be undone.")) return;
+  const b = $("#withdrawBtn"); b.disabled = true; b.textContent = "Draining…";
+  try { await api("/api/withdraw",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({to,confirm:true})});
+        alert("Withdraw started. Watch Slack for per-wallet progress and the completion alert."); }
+  catch(e){ alert("Withdraw failed to start: "+e.message); b.disabled=false; b.textContent="💸 Withdraw all funds"; }
+}
 
 function walletCard(w){
   const isOpen = open.has(w.id);
@@ -201,6 +214,11 @@ function escape(s){ return String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt
 
 function renderAutomation(a){
   const el = $("#automation"); if(!el) return;
+  if (a && a.withdrawing) {
+    el.innerHTML = '<div class="card paused-card"><span class="hl">💸 Withdraw in progress</span> '+
+      '<span class="mini">draining all wallets → watch Slack for progress</span></div>';
+    return;
+  }
   if (a && a.paused) {
     el.innerHTML = '<div class="card paused-card"><div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">'+
       '<span class="hl">⛔ Automation paused</span>'+
@@ -227,6 +245,7 @@ async function refresh(){
 
 $("#loginBtn").addEventListener("click", login);
 $("#reportBtn").addEventListener("click", sendReport);
+$("#withdrawBtn").addEventListener("click", withdrawAll);
 $("#pw").addEventListener("keydown",(e)=>{ if(e.key==="Enter") login(); });
 $("#logout").addEventListener("click", async()=>{ await fetch("/api/logout",{method:"POST"}); showLogin(); });
 refresh();

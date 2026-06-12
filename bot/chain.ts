@@ -282,6 +282,53 @@ export async function executeBuy(
   return { hash, otAmountWei: sim.otToUserWei };
 }
 
+// ---- transfers (for withdraw / fund retrieval) ----
+
+/** Exact USDT (B-USDT) balance of an address, in wei (18 decimals). */
+export async function usdtBalanceWei(addr: Address): Promise<bigint> {
+  return (await publicClient.readContract({
+    address: USDT,
+    abi: erc20Abi,
+    functionName: "balanceOf",
+    args: [addr],
+  })) as bigint;
+}
+
+/** Transfer an exact USDT amount (wei) to `to`. */
+export async function transferUsdt(s: Signer, to: Address, amountWei: bigint): Promise<Hex> {
+  const hash = await s.walletClient.writeContract({
+    address: USDT,
+    abi: erc20Abi,
+    functionName: "transfer",
+    args: [to, amountWei],
+    account: s.account,
+    chain: bsc,
+  });
+  const r = await publicClient.waitForTransactionReceipt({ hash });
+  if (r.status !== "success") throw new Error(`USDT transfer reverted: ${hash}`);
+  return hash;
+}
+
+/**
+ * Send (almost) all native BNB to `to`, leaving just enough for this tx's gas
+ * plus a small buffer. Returns null if the balance can't cover the gas.
+ */
+export async function sendAllBnb(s: Signer, to: Address): Promise<{ hash: Hex; valueWei: bigint } | null> {
+  const [bal, gasPrice] = await Promise.all([
+    publicClient.getBalance({ address: s.address }),
+    publicClient.getGasPrice(),
+  ]);
+  const gasLimit = 21000n;
+  const fee = gasPrice * gasLimit;
+  const buffer = fee; // keep an extra fee's worth as headroom
+  const value = bal - fee - buffer;
+  if (value <= 0n) return null;
+  const hash = await s.walletClient.sendTransaction({ account: s.account, to, value, chain: bsc });
+  const r = await publicClient.waitForTransactionReceipt({ hash });
+  if (r.status !== "success") throw new Error(`BNB transfer reverted: ${hash}`);
+  return { hash, valueWei: value };
+}
+
 export async function executeSell(
   s: Signer,
   market: Address,
