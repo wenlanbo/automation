@@ -19,8 +19,8 @@
   "paperBalanceUsdt": 1000,
   "minBnbReserve": 0.005,
   "outcomes": [
-    { "name": "France", "weight": 0.25 },
-    { "name": "Spain", "weight": 0.25 },
+    { "name": "France", "weight": 0.3 },
+    { "name": "Spain", "weight": 0.2 },
     { "name": "England", "weight": 0.12 },
     { "name": "Portugal", "weight": 0.12 },
     { "name": "Argentina", "weight": 0.1 },
