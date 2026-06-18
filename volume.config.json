@@ -3,7 +3,7 @@
   "durationHours": 24,
   "targetVolumeMultiple": 40,
   "continuousTrading": true,
-  "forceLiquidationAtEnd": true,
+  "forceLiquidationAtEnd": false,
   "targetCashRatio": 0.2,
   "sizeVolatility": 0.8,
   "liquidationRatio": 0.8,
@@ -67,5 +67,6 @@
       "weight": 0.03
     }
   ],
-  "wallets": []
+  "wallets": [],
+  "buyOnly": true
 }

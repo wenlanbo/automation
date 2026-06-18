@@ -364,8 +364,9 @@ export async function runVolumeStrategy(
     buildPortfolio(ctx);
 
       // End-of-window: optionally force-liquidate, then close (or repeat).
+      // buyOnly never liquidates — positions are accumulated and held.
       if (elapsed >= r.durationSec) {
-        if (cfg.forceLiquidationAtEnd) await execIntents(ctx, forceLiquidation(ctx.pf));
+        if (cfg.forceLiquidationAtEnd && !cfg.buyOnly) await execIntents(ctx, forceLiquidation(ctx.pf));
         prog.phase = "done";
         prog.windowsDone += 1;
         await notify.info(
@@ -390,8 +391,8 @@ export async function runVolumeStrategy(
         }
       }
 
-      // SELL event.
-      if (now >= new Date(prog.nextSellAt).getTime()) {
+      // SELL event — skipped entirely in buyOnly mode (accumulate + hold).
+      if (!cfg.buyOnly && now >= new Date(prog.nextSellAt).getTime()) {
         const dt = prog.cascadeSellsRemaining > 0 ? rand([60, 300]) : rand(iv);
         await execIntents(ctx, decideSell(prog, cfg, ctx.pf, elapsed, dt));
         prog.nextSellAt = new Date(now + dt * 1000).toISOString();

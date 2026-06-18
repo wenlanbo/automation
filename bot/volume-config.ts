@@ -21,6 +21,8 @@ export interface VolumeConfig {
   continuousTrading: boolean;
   /** Force-sell all inventory at the end of the window. */
   forceLiquidationAtEnd: boolean;
+  /** Buy-only mode: never sell or liquidate — deploy cash into positions and hold. */
+  buyOnly?: boolean;
   /** Target cash ratio on the wallet (0.10 = 10% cash, 90% deployed). */
   targetCashRatio: number;
   /** Log-normal sigma for order-size variation (many small, some large). */
