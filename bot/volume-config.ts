@@ -23,6 +23,13 @@ export interface VolumeConfig {
   forceLiquidationAtEnd: boolean;
   /** Buy-only mode: never sell or liquidate — deploy cash into positions and hold. */
   buyOnly?: boolean;
+  /** Exit mode: stop trading and gradually ladder-sell ALL positions to USDT.
+   * Takes precedence over the normal strategy + buyOnly. Resumes across restarts. */
+  exitMode?: boolean;
+  /** Fraction of each remaining position to sell per exit pass (default 0.15). */
+  exitChunkPct?: number;
+  /** Seconds between exit ladder-sells per wallet (default 600 = 10 min). */
+  exitEverySec?: number;
   /** Target cash ratio on the wallet (0.10 = 10% cash, 90% deployed). */
   targetCashRatio: number;
   /** Log-normal sigma for order-size variation (many small, some large). */
@@ -64,6 +71,8 @@ export const DEFAULT_VOLUME_CONFIG: VolumeConfig = {
   targetVolumeMultiple: 4.0,
   continuousTrading: true,
   forceLiquidationAtEnd: false,
+  exitChunkPct: 0.15,
+  exitEverySec: 600,
   targetCashRatio: 0.1,
   sizeVolatility: 0.8,
   liquidationRatio: 0.8,

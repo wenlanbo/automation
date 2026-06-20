@@ -170,6 +170,10 @@ export interface BotState {
   campaign?: Record<string, CampaignProgress>;
   /** Volume-generation strategy progress, keyed by walletId. */
   volume?: Record<string, VolumeProgress>;
+  /** Gradual-exit (wind-down) ladder progress, keyed by walletId. */
+  volumeExit?: Record<string, { at: string; done: boolean }>;
+  /** Guards the one-time "exit complete — all positions cleared" @here alert. */
+  volumeExitAllDoneAlerted?: boolean;
   lastRun: string | null;
   /** ISO of the last 30-min market-volume review (+ the volume seen then). */
   lastMarketReview?: string;

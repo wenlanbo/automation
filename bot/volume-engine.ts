@@ -264,6 +264,67 @@ async function pauseOnError(rc: RuntimeConfig, state: BotState, reason: string):
   );
 }
 
+/** Gradually wind one wallet's positions down to USDT. Each pass (gated by
+ *  exitEverySec) sells exitChunkPct of every remaining position, sweeping the
+ *  dust once a position drops below ~2× minOrder. Reverts (price impact) halve
+ *  the lot down to the tick floor. Marks the wallet done when it's cleared;
+ *  progress is persisted so the ladder resumes across restarts. */
+async function runExitForWallet(
+  rc: RuntimeConfig,
+  cfg: VolumeConfig,
+  w: ManagedWallet,
+  state: BotState,
+  market: Address,
+): Promise<void> {
+  state.volumeExit ??= {};
+  const ex = state.volumeExit[w.id];
+  if (ex?.done) return;
+  const now = Date.now();
+  const everySec = cfg.exitEverySec ?? 600;
+  if (ex && now - new Date(ex.at).getTime() < everySec * 1000) return; // ladder interval not elapsed
+
+  const addr = getAddress(w.address) as Address;
+  let us;
+  try {
+    us = await retry(() => chain.getUserState(market, addr));
+  } catch {
+    return; // transient read failure — try again next cycle
+  }
+  const held = us.holdings.filter((h) => h.otHolding > 0n && h.price > 0);
+  const totalVal = held.reduce((s, h) => s + parseFloat(formatUnits(h.otHolding, 18)) * h.price, 0);
+  if (totalVal < cfg.minOrderUsdt) {
+    state.volumeExit[w.id] = { at: new Date(now).toISOString(), done: true };
+    saveState(rc.statePath, state);
+    await notify.message(`🚪 exit ${w.label}: positions cleared ✅ (cash kept in wallet)`);
+    return;
+  }
+
+  const chunkBps = BigInt(Math.max(1, Math.round((cfg.exitChunkPct ?? 0.15) * 10000)));
+  const tries = cfg.maxTradeRetries ?? 5;
+  let soldUsd = 0;
+  for (const h of held) {
+    const holdingUsd = parseFloat(formatUnits(h.otHolding, 18)) * h.price;
+    // chunk = exitChunkPct of remaining; sweep the whole lot once it's small.
+    let otWei = floorTick((h.otHolding * chunkBps) / 10000n);
+    if (holdingUsd <= cfg.minOrderUsdt * 2 || otWei <= 0n) otWei = floorTick(h.otHolding);
+    if (otWei <= 0n) continue;
+    let lot = otWei;
+    for (let a = 0; a < tries && lot >= TICK_WEI; a++) {
+      try {
+        const sim = await chain.simulateSell(market, h.tokenId, lot);
+        if (!rc.dryRun) await chain.executeSell(w.signer, market, h.tokenId, lot, cfg.slippagePct, sim);
+        soldUsd += sim.collateralUsdt;
+        break;
+      } catch {
+        lot = floorTick(lot / 2n); // price impact too high — try a smaller slice
+      }
+    }
+  }
+  state.volumeExit[w.id] = { at: new Date(now).toISOString(), done: false };
+  saveState(rc.statePath, state);
+  await notify.message(`🚪 exit ${w.label}: sold ~${f(soldUsd, 2)} USDT this pass (~${f(totalVal, 2)} in positions before).`);
+}
+
 export async function runVolumeStrategy(
   rc: RuntimeConfig,
   wallets: ManagedWallet[],
@@ -295,6 +356,18 @@ export async function runVolumeStrategy(
     const camp = state.campaign?.[id];
     if (camp && camp.phase !== "done") continue;
     const addr = getAddress(w.address) as Address;
+
+    // Exit mode: gradually ladder-sell all positions to USDT, then idle. Skips
+    // the normal volume strategy entirely. State-tracked so it resumes on restart.
+    if (cfg.exitMode) {
+      try {
+        await runExitForWallet(rc, cfg, w, state, market);
+      } catch (e) {
+        await pauseOnError(rc, state, `exit ${w.label}: ${(e as Error).message}`);
+        return;
+      }
+      continue;
+    }
 
     try {
     // Start a new window on first run, or when the previous one finished and
@@ -403,6 +476,20 @@ export async function runVolumeStrategy(
       // Any error pauses the whole strategy until resumed from the dashboard.
       await pauseOnError(rc, state, `${w.label}: ${(e as Error).message}`);
       return;
+    }
+  }
+
+  // Exit completion: once every managed wallet's wind-down ladder is done,
+  // fire a one-time @here alert summarizing the recovered cash.
+  if (cfg.exitMode && !state.volumeExitAllDoneAlerted) {
+    const exits = ids.map((id) => state.volumeExit?.[id]);
+    const allDone = exits.length > 0 && exits.every((e) => e?.done);
+    if (allDone) {
+      state.volumeExitAllDoneAlerted = true;
+      saveState(rc.statePath, state);
+      await notify.alertHere(
+        `✅ Exit complete — all ${ids.length} wallet(s) wound down. Positions sold to USDT and held in the wallets, ready to withdraw.`,
+      );
     }
   }
 

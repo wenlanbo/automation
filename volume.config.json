@@ -8,7 +8,7 @@
   "sizeVolatility": 0.8,
   "liquidationRatio": 0.8,
   "minOrderUsdt": 1,
-  "slippagePct": 3,
+  "slippagePct": 8,
   "maxTradeRetries": 5,
   "buyIntervalSec": [
     120,
@@ -68,5 +68,8 @@
     }
   ],
   "wallets": [],
-  "buyOnly": true
+  "buyOnly": false,
+  "exitMode": true,
+  "exitChunkPct": 0.15,
+  "exitEverySec": 600
 }
