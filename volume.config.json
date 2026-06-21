@@ -1,14 +1,14 @@
 {
   "enabled": true,
   "durationHours": 24,
-  "targetVolumeMultiple": 40,
+  "targetVolumeMultiple": 30,
   "continuousTrading": true,
   "forceLiquidationAtEnd": false,
-  "targetCashRatio": 0.2,
+  "targetCashRatio": 0.25,
   "sizeVolatility": 0.8,
   "liquidationRatio": 0.8,
   "minOrderUsdt": 1,
-  "slippagePct": 8,
+  "slippagePct": 15,
   "maxTradeRetries": 5,
   "buyIntervalSec": [
     120,
@@ -19,8 +19,8 @@
     900
   ],
   "intervalOverrideSec": [
-    190,
-    1500
+    180,
+    1200
   ],
   "buyPctRange": [
     0.1,
@@ -33,43 +33,37 @@
   "repeatWindow": true,
   "paperBalanceUsdt": 1000,
   "minBnbReserve": 0.005,
-  "outcomes": [
+  "exitChunkPct": 0.15,
+  "exitEverySec": 600,
+  "markets": [
     {
-      "name": "France",
-      "weight": 0.3
+      "address": "0x7a41653755Fca0aDf6d99d29a3df8c034c9AD7D4",
+      "label": "Love Island Women",
+      "outcomes": [
+        { "name": "Token 1", "weight": 0.125 },
+        { "name": "Token 2", "weight": 0.125 },
+        { "name": "Token 4", "weight": 0.125 },
+        { "name": "Token 8", "weight": 0.125 },
+        { "name": "Token 16", "weight": 0.125 },
+        { "name": "Token 32", "weight": 0.125 },
+        { "name": "Token 64", "weight": 0.125 },
+        { "name": "Token 128", "weight": 0.125 }
+      ]
     },
     {
-      "name": "Spain",
-      "weight": 0.2
-    },
-    {
-      "name": "England",
-      "weight": 0.12
-    },
-    {
-      "name": "Portugal",
-      "weight": 0.12
-    },
-    {
-      "name": "Argentina",
-      "weight": 0.1
-    },
-    {
-      "name": "Brazil",
-      "weight": 0.1
-    },
-    {
-      "name": "Germany",
-      "weight": 0.03
-    },
-    {
-      "name": "Netherlands",
-      "weight": 0.03
+      "address": "0xcb847C61c418da00Dc69a32eE05279D39a51F160",
+      "label": "Love Island Men",
+      "outcomes": [
+        { "name": "Token 1", "weight": 0.125 },
+        { "name": "Token 2", "weight": 0.125 },
+        { "name": "Token 4", "weight": 0.125 },
+        { "name": "Token 8", "weight": 0.125 },
+        { "name": "Token 16", "weight": 0.125 },
+        { "name": "Token 32", "weight": 0.125 },
+        { "name": "Token 64", "weight": 0.125 },
+        { "name": "Token 128", "weight": 0.125 }
+      ]
     }
   ],
-  "wallets": [],
-  "buyOnly": false,
-  "exitMode": true,
-  "exitChunkPct": 0.15,
-  "exitEverySec": 600
+  "wallets": []
 }

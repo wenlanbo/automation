@@ -136,6 +136,9 @@ export interface CampaignProgress {
  */
 export interface VolumeProgress {
   phase: "trading" | "done";
+  /** Market (address) this wallet's window trades. Multi-market: each wallet is
+   * assigned one market; if this changes, a fresh window starts. */
+  market?: string;
   /** Wallet capital at window start — drives volume rates + thresholds. */
   initialBalance: number;
   /** This window's target volume multiple. Set per window (randomized for
@@ -170,10 +173,8 @@ export interface BotState {
   campaign?: Record<string, CampaignProgress>;
   /** Volume-generation strategy progress, keyed by walletId. */
   volume?: Record<string, VolumeProgress>;
-  /** Gradual-exit (wind-down) ladder progress, keyed by walletId. */
-  volumeExit?: Record<string, { at: string; done: boolean }>;
-  /** Guards the one-time "exit complete — all positions cleared" @here alert. */
-  volumeExitAllDoneAlerted?: boolean;
+  /** Gradual-exit (wind-down) ladder progress, keyed by `walletId|market`. */
+  volumeExit?: Record<string, { at: string; done?: boolean }>;
   lastRun: string | null;
   /** ISO of the last 30-min market-volume review (+ the volume seen then). */
   lastMarketReview?: string;

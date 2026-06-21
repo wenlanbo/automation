@@ -11,6 +11,16 @@ export interface VolumeOutcome {
   weight: number;
 }
 
+/** One market this bot trades, with its own outcomes + weights. */
+export interface VolumeMarket {
+  /** Market contract address. */
+  address: string;
+  /** Display label (Slack/logs). */
+  label?: string;
+  /** Outcomes to trade in this market + selection weights. */
+  outcomes: VolumeOutcome[];
+}
+
 export interface VolumeConfig {
   enabled: boolean;
   /** Total execution window X (hours). */
@@ -21,15 +31,6 @@ export interface VolumeConfig {
   continuousTrading: boolean;
   /** Force-sell all inventory at the end of the window. */
   forceLiquidationAtEnd: boolean;
-  /** Buy-only mode: never sell or liquidate — deploy cash into positions and hold. */
-  buyOnly?: boolean;
-  /** Exit mode: stop trading and gradually ladder-sell ALL positions to USDT.
-   * Takes precedence over the normal strategy + buyOnly. Resumes across restarts. */
-  exitMode?: boolean;
-  /** Fraction of each remaining position to sell per exit pass (default 0.15). */
-  exitChunkPct?: number;
-  /** Seconds between exit ladder-sells per wallet (default 600 = 10 min). */
-  exitEverySec?: number;
   /** Target cash ratio on the wallet (0.10 = 10% cash, 90% deployed). */
   targetCashRatio: number;
   /** Log-normal sigma for order-size variation (many small, some large). */
@@ -59,8 +60,19 @@ export interface VolumeConfig {
   paperBalanceUsdt: number;
   /** Halt live buys for a wallet if BNB (gas) drops below this. */
   minBnbReserve: number;
-  /** Outcomes to trade + weights. Defaults to the 8-country World Cup vector. */
+  /** Outcomes to trade + weights (single-market mode / fallback). */
   outcomes: VolumeOutcome[];
+  /** Multi-market mode: trade several markets at once. Each managed wallet is
+   * assigned one market (round-robin). When set + non-empty, this supersedes the
+   * single `outcomes`/TARGET_MARKET path. */
+  markets?: VolumeMarket[];
+  /** Markets (addresses) to WIND DOWN: stop trading + gradually ladder-sell any
+   * holdings to cash. Must still be present in `markets` (for outcomes/snapshot). */
+  exitMarkets?: string[];
+  /** Fraction of remaining holdings to sell per exit action (default 0.15). */
+  exitChunkPct: number;
+  /** Seconds between exit ladder-sells per wallet+market (default 600 = 10 min). */
+  exitEverySec: number;
   /** Wallet ids this strategy manages. Empty = all loaded wallets. */
   wallets: string[];
 }
@@ -71,8 +83,6 @@ export const DEFAULT_VOLUME_CONFIG: VolumeConfig = {
   targetVolumeMultiple: 4.0,
   continuousTrading: true,
   forceLiquidationAtEnd: false,
-  exitChunkPct: 0.15,
-  exitEverySec: 600,
   targetCashRatio: 0.1,
   sizeVolatility: 0.8,
   liquidationRatio: 0.8,
@@ -86,6 +96,8 @@ export const DEFAULT_VOLUME_CONFIG: VolumeConfig = {
   repeatWindow: false,
   paperBalanceUsdt: 1000,
   minBnbReserve: 0.005,
+  exitChunkPct: 0.15,
+  exitEverySec: 600,
   outcomes: [
     { name: "France", weight: 0.2 },
     { name: "Spain", weight: 0.2 },
@@ -121,9 +133,20 @@ function validate(c: VolumeConfig): void {
     errs.push("targetCashRatio must be in [0, 1)");
   if (c.minOrderUsdt <= 0) errs.push("minOrderUsdt must be > 0");
   if (c.slippagePct < 0 || c.slippagePct >= 100) errs.push("slippagePct must be in [0, 100)");
-  if (!Array.isArray(c.outcomes) || c.outcomes.length === 0)
-    errs.push("outcomes must be a non-empty array");
-  if (c.outcomes.some((o) => !o.name || o.weight <= 0))
-    errs.push("each outcome needs a name and weight > 0");
+  const multi = Array.isArray(c.markets) && c.markets.length > 0;
+  if (multi) {
+    c.markets!.forEach((m, i) => {
+      if (!m.address) errs.push(`markets[${i}]: address required`);
+      if (!Array.isArray(m.outcomes) || m.outcomes.length === 0)
+        errs.push(`markets[${i}] (${m.label ?? m.address}): outcomes must be non-empty`);
+      else if (m.outcomes.some((o) => !o.name || o.weight <= 0))
+        errs.push(`markets[${i}] (${m.label ?? m.address}): each outcome needs a name and weight > 0`);
+    });
+  } else {
+    if (!Array.isArray(c.outcomes) || c.outcomes.length === 0)
+      errs.push("outcomes must be a non-empty array (or set markets[])");
+    if (c.outcomes.some((o) => !o.name || o.weight <= 0))
+      errs.push("each outcome needs a name and weight > 0");
+  }
   if (errs.length) throw new Error("invalid volume.config.json:\n  - " + errs.join("\n  - "));
 }

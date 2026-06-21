@@ -10,7 +10,8 @@ import * as notify from "./notify.ts";
 import { saveState } from "./state.ts";
 import type { BotState, MarketSnapshot, VolumeProgress } from "./types.ts";
 import type { ManagedWallet } from "./wallets.ts";
-import { loadVolumeConfig, type VolumeConfig } from "./volume-config.ts";
+import { loadVolumeConfig, type VolumeConfig, type VolumeOutcome, type VolumeMarket } from "./volume-config.ts";
+import { buildMarketSnapshot } from "./market.ts";
 import {
   computeRates,
   decideBuy,
@@ -49,12 +50,12 @@ interface Resolved {
   prices: Map<number, number>;
 }
 
-function resolveOutcomes(cfg: VolumeConfig, snap: MarketSnapshot): Resolved {
+function resolveOutcomes(outcomes: VolumeOutcome[], snap: MarketSnapshot): Resolved {
   const tokenIds: number[] = [];
   const weights: number[] = [];
   const names = new Map<number, string>();
   const prices = new Map<number, number>();
-  for (const want of cfg.outcomes) {
+  for (const want of outcomes) {
     const oc = snap.outcomes.find((o) => o.name.toLowerCase() === want.name.toLowerCase());
     if (!oc) continue;
     tokenIds.push(oc.tokenId);
@@ -264,65 +265,100 @@ async function pauseOnError(rc: RuntimeConfig, state: BotState, reason: string):
   );
 }
 
-/** Gradually wind one wallet's positions down to USDT. Each pass (gated by
- *  exitEverySec) sells exitChunkPct of every remaining position, sweeping the
- *  dust once a position drops below ~2× minOrder. Reverts (price impact) halve
- *  the lot down to the tick floor. Marks the wallet done when it's cleared;
- *  progress is persisted so the ladder resumes across restarts. */
-async function runExitForWallet(
+/**
+ * Wind down EXIT markets: stop trading them and gradually ladder-sell any
+ * holdings to cash (exitChunkPct of remaining per exitEverySec, sweeping dust),
+ * until flat. Live-only. Pauses the strategy on a persistent sell failure.
+ */
+async function runExits(
   rc: RuntimeConfig,
   cfg: VolumeConfig,
-  w: ManagedWallet,
+  wallets: ManagedWallet[],
   state: BotState,
-  market: Address,
+  snaps: Map<string, MarketSnapshot>,
+  ids: string[],
 ): Promise<void> {
+  if (rc.dryRun) return; // wind-down operates on real on-chain holdings
+  const exitDefs = (cfg.markets ?? []).filter((m) =>
+    (cfg.exitMarkets ?? []).some((a) => a.toLowerCase() === m.address.toLowerCase()),
+  );
+  if (!exitDefs.length) return;
   state.volumeExit ??= {};
-  const ex = state.volumeExit[w.id];
-  if (ex?.done) return;
   const now = Date.now();
-  const everySec = cfg.exitEverySec ?? 600;
-  if (ex && now - new Date(ex.at).getTime() < everySec * 1000) return; // ladder interval not elapsed
-
-  const addr = getAddress(w.address) as Address;
-  let us;
-  try {
-    us = await retry(() => chain.getUserState(market, addr));
-  } catch {
-    return; // transient read failure — try again next cycle
-  }
-  const held = us.holdings.filter((h) => h.otHolding > 0n && h.price > 0);
-  const totalVal = held.reduce((s, h) => s + parseFloat(formatUnits(h.otHolding, 18)) * h.price, 0);
-  if (totalVal < cfg.minOrderUsdt) {
-    state.volumeExit[w.id] = { at: new Date(now).toISOString(), done: true };
-    saveState(rc.statePath, state);
-    await notify.message(`🚪 exit ${w.label}: positions cleared ✅ (cash kept in wallet)`);
-    return;
-  }
-
   const chunkBps = BigInt(Math.max(1, Math.round((cfg.exitChunkPct ?? 0.15) * 10000)));
   const tries = cfg.maxTradeRetries ?? 5;
-  let soldUsd = 0;
-  for (const h of held) {
-    const holdingUsd = parseFloat(formatUnits(h.otHolding, 18)) * h.price;
-    // chunk = exitChunkPct of remaining; sweep the whole lot once it's small.
-    let otWei = floorTick((h.otHolding * chunkBps) / 10000n);
-    if (holdingUsd <= cfg.minOrderUsdt * 2 || otWei <= 0n) otWei = floorTick(h.otHolding);
-    if (otWei <= 0n) continue;
-    let lot = otWei;
-    for (let a = 0; a < tries && lot >= TICK_WEI; a++) {
+
+  for (const id of ids) {
+    const w = wallets.find((x) => x.id === id);
+    if (!w) continue;
+    const addr = getAddress(w.address) as Address;
+    for (const md of exitDefs) {
+      const lc = md.address.toLowerCase();
+      const key = `${id}|${lc}`;
+      const ex = state.volumeExit[key];
+      if (ex?.done) continue;
+      if (ex && now - new Date(ex.at).getTime() < cfg.exitEverySec * 1000) continue;
+      const snap = snaps.get(lc);
+      if (!snap) continue;
+      const market = getAddress(md.address) as Address;
+      const priceByToken = new Map(snap.outcomes.map((o) => [o.tokenId, o.price]));
+      const nameByToken = new Map(snap.outcomes.map((o) => [o.tokenId, o.name]));
+
+      let us;
       try {
-        const sim = await chain.simulateSell(market, h.tokenId, lot);
-        if (!rc.dryRun) await chain.executeSell(w.signer, market, h.tokenId, lot, cfg.slippagePct, sim);
-        soldUsd += sim.collateralUsdt;
-        break;
+        us = await retry(() => chain.getUserState(market, addr));
       } catch {
-        lot = floorTick(lot / 2n); // price impact too high — try a smaller slice
+        continue; // transient read failure — try next cycle
+      }
+      const held = us.holdings.filter((h) => h.otHolding > 0n);
+      const totalVal = held.reduce(
+        (s, h) => s + parseFloat(formatUnits(h.otHolding, 18)) * (priceByToken.get(h.tokenId) ?? 0),
+        0,
+      );
+      if (totalVal < cfg.minOrderUsdt) {
+        state.volumeExit[key] = { at: new Date(now).toISOString(), done: true };
+        saveState(rc.statePath, state);
+        await notify.info(`exit ${w.label} @ ${md.label ?? lc.slice(0, 10)}: position cleared ✅`);
+        continue;
+      }
+
+      try {
+        for (const h of held) {
+          const price = priceByToken.get(h.tokenId) ?? 0;
+          if (price <= 0) continue;
+          const holdingWei = h.otHolding;
+          const holdingUsd = parseFloat(formatUnits(holdingWei, 18)) * price;
+          // chunk = exitChunkPct of remaining; sweep the whole lot if it's small.
+          let otWei = floorTick((holdingWei * chunkBps) / 10000n);
+          if (holdingUsd <= cfg.minOrderUsdt * 2 || otWei <= 0n) otWei = floorTick(holdingWei);
+          if (otWei <= 0n) continue;
+          let sim!: Awaited<ReturnType<typeof chain.simulateSell>>;
+          let lastErr: unknown = null;
+          for (let a = 1; a <= tries; a++) {
+            try {
+              sim = await chain.simulateSell(market, h.tokenId, otWei);
+              await chain.executeSell(w.signer, market, h.tokenId, otWei, cfg.slippagePct, sim);
+              lastErr = null;
+              break;
+            } catch (e) {
+              lastErr = e;
+              if (a < tries) await new Promise((r) => setTimeout(r, 700 * a));
+            }
+          }
+          if (lastErr) throw new Error(`exit sell ${h.tokenId} failed after ${tries} tries: ${(lastErr as Error).message}`);
+          const name = nameByToken.get(h.tokenId) ?? `Token ${h.tokenId}`;
+          const line = `🔻 [${notify.tagStr()}] exit ${w.label} @ ${md.label ?? lc.slice(0, 8)} SELL ${name} ${f(parseFloat(formatUnits(otWei, 18)))} OT → ${f(sim.collateralUsdt, 2)} USDT @ ${f(sim.priceBefore, 4)}`;
+          console.log("  [exit] " + line);
+          await notify.message(line);
+        }
+        state.volumeExit[key] = { at: new Date(now).toISOString() };
+        saveState(rc.statePath, state);
+      } catch (e) {
+        await pauseOnError(rc, state, `exit ${w.label} @ ${md.label ?? lc}: ${(e as Error).message}`);
+        return;
       }
     }
   }
-  state.volumeExit[w.id] = { at: new Date(now).toISOString(), done: false };
-  saveState(rc.statePath, state);
-  await notify.message(`🚪 exit ${w.label}: sold ~${f(soldUsd, 2)} USDT this pass (~${f(totalVal, 2)} in positions before).`);
 }
 
 export async function runVolumeStrategy(
@@ -334,19 +370,42 @@ export async function runVolumeStrategy(
   const cfg = loadVolumeConfig();
   if (!cfg.enabled) return;
   if (state.paused) return; // halted on a prior error — wait for dashboard resume
-  if (snapshot.isFinalised) return;
-
-  const res = resolveOutcomes(cfg, snapshot);
-  if (res.tokenIds.length === 0) {
-    await notify.warn("volume: none of the configured outcomes matched the market — skipping");
-    return;
-  }
   state.volume ??= {};
-  const market = getAddress(rc.targetMarket) as Address;
   const now = Date.now();
   const ids = cfg.wallets.length ? cfg.wallets : wallets.map((w) => w.id);
 
-  for (const id of ids) {
+  // Markets to trade: multi-market list if set, else single (targetMarket + outcomes).
+  const marketDefs: VolumeMarket[] =
+    cfg.markets && cfg.markets.length ? cfg.markets : [{ address: rc.targetMarket, outcomes: cfg.outcomes }];
+
+  // Build a snapshot per distinct market (reuse the passed target snapshot if it matches).
+  const snaps = new Map<string, MarketSnapshot>();
+  snaps.set(snapshot.address.toLowerCase(), snapshot);
+  for (const md of marketDefs) {
+    const key = md.address.toLowerCase();
+    if (snaps.has(key)) continue;
+    try {
+      snaps.set(key, await buildMarketSnapshot(rc.restBase, md.address));
+    } catch (e) {
+      await notify.warn(`volume: snapshot failed for ${md.label ?? md.address}: ${(e as Error).message}`);
+    }
+  }
+
+  // Wind down any EXIT markets (ladder-sell to cash), then stop trading them.
+  await runExits(rc, cfg, wallets, state, snaps, ids);
+  if (state.paused) return; // an exit sell failed → paused
+
+  // Active markets = configured markets minus those being wound down.
+  const exitSet = new Set((cfg.exitMarkets ?? []).map((a) => a.toLowerCase()));
+  const activeDefs = marketDefs.filter((m) => !exitSet.has(m.address.toLowerCase()));
+  if (activeDefs.length === 0) return; // everything is winding down — no active trading
+
+  // Stable wallet→market assignment: keep a wallet's current market if it's still
+  // active (don't reshuffle/strand positions); only (re)assign wallets whose market
+  // was removed or never set, distributed round-robin across the active markets.
+  let assignCounter = 0;
+  for (let i = 0; i < ids.length; i++) {
+    const id = ids[i]!;
     const w = wallets.find((x) => x.id === id);
     if (!w) {
       await notify.warn(`volume: wallet "${id}" not loaded — skipping`);
@@ -355,19 +414,25 @@ export async function runVolumeStrategy(
     // Yield to an active distribute-out campaign — one engine owns a wallet at a time.
     const camp = state.campaign?.[id];
     if (camp && camp.phase !== "done") continue;
-    const addr = getAddress(w.address) as Address;
 
-    // Exit mode: gradually ladder-sell all positions to USDT, then idle. Skips
-    // the normal volume strategy entirely. State-tracked so it resumes on restart.
-    if (cfg.exitMode) {
-      try {
-        await runExitForWallet(rc, cfg, w, state, market);
-      } catch (e) {
-        await pauseOnError(rc, state, `exit ${w.label}: ${(e as Error).message}`);
-        return;
-      }
+    const cur = state.volume?.[id]?.market?.toLowerCase();
+    let md = cur ? activeDefs.find((m) => m.address.toLowerCase() === cur) : undefined;
+    if (!md) {
+      md = activeDefs[assignCounter % activeDefs.length]!;
+      assignCounter++;
+    }
+    const snap = snaps.get(md.address.toLowerCase());
+    if (!snap || snap.isFinalised) {
+      if (!snap) await notify.warn(`volume ${w.label}: no snapshot for ${md.label ?? md.address} — skipping`);
       continue;
     }
+    const res = resolveOutcomes(md.outcomes, snap);
+    if (res.tokenIds.length === 0) {
+      await notify.warn(`volume ${w.label}: no configured outcomes matched ${md.label ?? md.address} — skipping`);
+      continue;
+    }
+    const market = getAddress(md.address) as Address;
+    const addr = getAddress(w.address) as Address;
 
     try {
     // Start a new window on first run, or when the previous one finished and
@@ -376,8 +441,9 @@ export async function runVolumeStrategy(
     // recycles its full deployed capital across back-to-back windows; the
     // dry-run paper ledger carries forward across windows too.
     let prog = state.volume[id];
-    if (!prog || (prog.phase === "done" && cfg.repeatWindow)) {
-      const carryPaper = rc.dryRun ? prog?.paper : undefined;
+    const marketChanged = !!prog?.market && prog.market.toLowerCase() !== market.toLowerCase();
+    if (!prog || (prog.phase === "done" && cfg.repeatWindow) || marketChanged) {
+      const carryPaper = rc.dryRun && !marketChanged ? prog?.paper : undefined;
       let portfolioVal: number;
       if (!rc.dryRun) {
         const [bal, us] = await Promise.all([
@@ -406,11 +472,12 @@ export async function runVolumeStrategy(
       }
       const windowNum = (prog?.windowsDone ?? 0) + 1;
       prog = freshProgress(cfg, portfolioVal, now, rc.dryRun);
+      prog.market = market;
       prog.windowsDone = windowNum - 1;
       if (rc.dryRun && carryPaper) prog.paper = carryPaper; // preserve paper holdings + cash
       state.volume[id] = prog;
       await notify.info(
-        `volume ${w.label}: window ${windowNum} started — capital ${f(portfolioVal, 2)} USDT, target ${prog.targetMultiple ?? cfg.targetVolumeMultiple}x over ${cfg.durationHours}h`,
+        `volume ${w.label} → ${md.label ?? md.address.slice(0, 10)}: window ${windowNum} started — capital ${f(portfolioVal, 2)} USDT, target ${prog.targetMultiple ?? cfg.targetVolumeMultiple}x over ${cfg.durationHours}h`,
       );
     }
     if (prog.phase === "done") continue;
@@ -437,9 +504,8 @@ export async function runVolumeStrategy(
     buildPortfolio(ctx);
 
       // End-of-window: optionally force-liquidate, then close (or repeat).
-      // buyOnly never liquidates — positions are accumulated and held.
       if (elapsed >= r.durationSec) {
-        if (cfg.forceLiquidationAtEnd && !cfg.buyOnly) await execIntents(ctx, forceLiquidation(ctx.pf));
+        if (cfg.forceLiquidationAtEnd) await execIntents(ctx, forceLiquidation(ctx.pf));
         prog.phase = "done";
         prog.windowsDone += 1;
         await notify.info(
@@ -464,8 +530,8 @@ export async function runVolumeStrategy(
         }
       }
 
-      // SELL event — skipped entirely in buyOnly mode (accumulate + hold).
-      if (!cfg.buyOnly && now >= new Date(prog.nextSellAt).getTime()) {
+      // SELL event.
+      if (now >= new Date(prog.nextSellAt).getTime()) {
         const dt = prog.cascadeSellsRemaining > 0 ? rand([60, 300]) : rand(iv);
         await execIntents(ctx, decideSell(prog, cfg, ctx.pf, elapsed, dt));
         prog.nextSellAt = new Date(now + dt * 1000).toISOString();
@@ -476,20 +542,6 @@ export async function runVolumeStrategy(
       // Any error pauses the whole strategy until resumed from the dashboard.
       await pauseOnError(rc, state, `${w.label}: ${(e as Error).message}`);
       return;
-    }
-  }
-
-  // Exit completion: once every managed wallet's wind-down ladder is done,
-  // fire a one-time @here alert summarizing the recovered cash.
-  if (cfg.exitMode && !state.volumeExitAllDoneAlerted) {
-    const exits = ids.map((id) => state.volumeExit?.[id]);
-    const allDone = exits.length > 0 && exits.every((e) => e?.done);
-    if (allDone) {
-      state.volumeExitAllDoneAlerted = true;
-      saveState(rc.statePath, state);
-      await notify.alertHere(
-        `✅ Exit complete — all ${ids.length} wallet(s) wound down. Positions sold to USDT and held in the wallets, ready to withdraw.`,
-      );
     }
   }
 
@@ -524,6 +576,7 @@ export function volumeSummary(state: BotState): string[] {
   if (!state.volume) return [];
   return Object.entries(state.volume).map(([id, p]) => {
     const vol = p.cumulativeBuyVolume + p.cumulativeSellVolume;
-    return `• ${id} → ${p.phase}: vol ${f(vol, 0)} USDT, ${p.trades} trades`;
+    const mkt = p.market ? ` @${p.market.slice(0, 8)}…` : "";
+    return `• ${id}${mkt} → ${p.phase}: vol ${f(vol, 0)} USDT, ${p.trades} trades`;
   });
 }
